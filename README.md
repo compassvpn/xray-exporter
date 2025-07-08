@@ -1,7 +1,7 @@
 # Xray Exporter
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/compassvpn/xray-exporter)][goreportcard]
-[![Build Status](https://github.com/compassvpn/xray-exporter/actions/workflows/ci.yml/badge.svg?branch=main)][build-status]
+[![Build Status](https://github.com/compassvpn/xray-exporter/actions/workflows/build-release-deploy.yml/badge.svg?branch=main)][build-status]
 
 An exporter that collects Xray (and V2Ray) metrics over its [Stats API][stats-api] and exports them to Prometheus.
 
