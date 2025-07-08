@@ -125,21 +125,19 @@ jobs:
       run: |
         TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
         
-        # Remove any existing manifest to avoid conflicts
+        # Remove any existing manifests to avoid conflicts
         docker manifest rm ${TAG} 2>/dev/null || true
+        docker manifest rm ${TAG}-amd64 2>/dev/null || true
+        docker manifest rm ${TAG}-arm64 2>/dev/null || true
+        docker manifest rm ${TAG}-arm 2>/dev/null || true
         
-        # Create new manifest list
-        docker manifest create ${TAG} \
+        # Create new manifest list with --amend flag to handle existing manifests
+        docker manifest create ${TAG} --amend \
           ${TAG}-amd64 \
           ${TAG}-arm64 \
           ${TAG}-arm
           
-        # Annotate architectures
-        docker manifest annotate ${TAG} ${TAG}-amd64 --os linux --arch amd64
-        docker manifest annotate ${TAG} ${TAG}-arm64 --os linux --arch arm64
-        docker manifest annotate ${TAG} ${TAG}-arm --os linux --arch arm --variant v7
-        
-        # Push manifest
+        # Push manifest without annotations (let Docker auto-detect)
         docker manifest push ${TAG}
 
   release:
