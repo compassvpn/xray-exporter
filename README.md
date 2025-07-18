@@ -6,9 +6,9 @@ An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and expo
 
 - **Runtime Metrics**: Memory usage, goroutines, uptime, GC stats
 - **Traffic Statistics**: Per-user, per-inbound, per-outbound data transfer metrics  
-- **User Activity Metrics**: Real-time user counts, connection patterns, blocked requests
+- **User Activity Metrics**: Real-time user counts, connection patterns
 - **Domain Analytics**: Most requested domains and direct IP access tracking
-- **Outbound Routing**: Traffic distribution across different outbound connections
+- **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
 - **High Performance**: Optimized log parsing with circular buffers and LRU caching
 - **Auto-scaling**: Adaptive memory usage based on traffic patterns
 - **Cross-platform**: Supports Linux, macOS, Windows with proper log rotation detection
@@ -34,7 +34,7 @@ Available tags:
 
 ### Grafana Dashboard
 
-Our CompassVPN Grafana dashboard is available [here](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/). Please take a look at the Grafana docs to get the steps for importing dashboards from JSON files.
+Our CompassVPN Grafana dashboard is available [here](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/). Please refer to the Grafana docs to get the steps for importing dashboards from JSON files.
 
 ## Command Line Options
 
@@ -68,8 +68,8 @@ Help Options:
 
 The exporter can parse Xray access logs to provide additional user activity insights:
 
-- **`--log-path`**: Path to Xray access log file. Set to an empty string to disable user metrics.
-- **`--log-time-window`**: Time window in minutes for user activity metrics (default: 3 minutes).
+- **`--log-path`**: Path to Xray access log file. Set to empty string to disable user metrics.
+- **`--log-time-window`**: Time window in minutes for user activity metrics (default: 5 minutes).
 
 These metrics help you understand user behavior, popular domains, and traffic patterns in real-time.
 
@@ -195,7 +195,7 @@ time="2025-01-15T10:30:45Z" level=info msg="Log parser started successfully"
 time="2025-01-15T10:30:45Z" level=info msg="Server starting on :9550"
 ```
 
-Use the `--listen` option if you'd like to change the listen address or port. You can open `http://ip:9550` in your browser:
+Use `--listen` option if you'd like to change the listen address or port. You can open `http://ip:9550` in your browser:
 
 Click the `Scrape Xray Metrics` and the exporter will expose all metrics, including Xray/V2Ray runtime and statistics data in the Prometheus metrics format, for example:
 
@@ -269,9 +269,8 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 | :----- | :---------- | :----- |
 | `xray_unique_users` | Number of unique users active in the time window | - |
 | `xray_total_connections` | Total number of connections in the time window | - |
-| `xray_blocked_requests` | Number of blocked/rejected requests | - |
 | `xray_requested_domain_ip_total` | Total requests per domain or IP address | `target` |
-| `xray_outbound_requests_total` | Total requests per outbound connection | `outbound` |
+| `xray_outbound_requests_total` | Total requests per outbound connection (includes blocked requests) | `outbound` |
 
 ### Core Metrics
 

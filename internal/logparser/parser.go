@@ -21,7 +21,6 @@ type LogEntry struct {
 	Timestamp time.Time
 	IP        string
 	Domain    string
-	IsBlocked bool
 }
 
 // Holds collected metrics for a specified time window.
@@ -38,10 +37,9 @@ type MetricsData struct {
 	ConnectionsBufSize   int         // actual size of valid data in buffer
 	ConnectionsBufCap    int         // maximum buffer capacity
 
-	BlockedConns int64
-	LastPos      int64  // last position read in log file
-	LastInode    uint64 // last inode of log file (for rotation detection)
-	mu           sync.RWMutex
+	LastPos   int64  // last position read in log file
+	LastInode uint64 // last inode of log file (for rotation detection)
+	mu        sync.RWMutex
 }
 
 // Handles log file monitoring and metrics collection.
@@ -220,7 +218,7 @@ func (p *Parser) Stop() {
 
 // Returns current user activity metrics within the time window.
 // Also performs cleanup of expired data to prevent memory leaks.
-func (p *Parser) GetMetrics() (int, int64, int64) {
+func (p *Parser) GetMetrics() (int, int64) {
 	p.metrics.mu.Lock()
 	defer p.metrics.mu.Unlock()
 
@@ -254,7 +252,7 @@ func (p *Parser) GetMetrics() (int, int64, int64) {
 		}
 	}
 
-	return activeIPs, validConnections, p.metrics.BlockedConns
+	return activeIPs, validConnections
 }
 
 // Returns a copy of current domain request counts.
@@ -411,9 +409,6 @@ func (p *Parser) parseLogFile() error {
 
 		// Update user metrics (time-windowed)
 		p.addConnectionTimestamp(entry.Timestamp)
-		if entry.IsBlocked {
-			p.metrics.BlockedConns++
-		}
 		// Track unique IPs with last seen time
 		p.metrics.UniqueIPs[entry.IP] = entry.Timestamp
 	}
@@ -442,9 +437,6 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 		return nil, err
 	}
 	entry.Timestamp = timestamp
-
-	// Check if request was blocked (faster string search)
-	entry.IsBlocked = strings.Contains(line, "-> blocked]")
 
 	// Extract IP with single pass through formats
 	var ip string

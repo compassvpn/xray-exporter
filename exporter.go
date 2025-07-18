@@ -78,10 +78,8 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, logP
 		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
 
 		// User activity metrics from log parsing
-		"unique_users":       {txt: "Number of unique users in time window"},
-		"total_connections":  {txt: "Total number of connections in time window"},
-		"blocked_requests":   {txt: "Number of blocked requests in time window"},
-		"blocked_percentage": {txt: "Percentage of blocked requests"},
+		"unique_users":      {txt: "Number of unique users in time window"},
+		"total_connections": {txt: "Total number of connections in time window"},
 	} {
 		e.metricDescriptions[k] = e.newMetricDescr(k, desc.txt, desc.lbls)
 	}
@@ -287,11 +285,10 @@ func (e *Exporter) collectLogMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	uniqueUsers, totalConns, blockedConns := e.logParser.GetMetrics()
+	uniqueUsers, totalConns := e.logParser.GetMetrics()
 
 	e.registerConstMetricGauge(ch, "unique_users", float64(uniqueUsers))
 	e.registerConstMetricGauge(ch, "total_connections", float64(totalConns))
-	e.registerConstMetricCounter(ch, "blocked_requests", float64(blockedConns))
 }
 
 // Collects domain and IP request statistics from log parser.
