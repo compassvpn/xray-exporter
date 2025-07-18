@@ -1,8 +1,10 @@
+// Core exporter functionality for collecting Xray metrics.
 package main
 
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +16,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+
+	"xray-exporter/internal/logparser"
 )
 
+// Collects Xray metrics and exposes them in Prometheus format.
+// Connects to Xray's gRPC API for runtime stats and optionally parses
+// access logs for user activity metrics.
 type Exporter struct {
 	sync.Mutex
 	endpoint           string
@@ -24,13 +31,27 @@ type Exporter struct {
 	totalScrapes       prometheus.Counter
 	metricDescriptions map[string]*prometheus.Desc
 	conn               *grpc.ClientConn
+
+	// Log parsing for user metrics
+	logParser     *logparser.Parser
+	logPath       string
+	logTimeWindow time.Duration
 }
 
+// Creates a new Xray exporter with default settings.
 func NewExporter(endpoint string, scrapeTimeout time.Duration) (*Exporter, error) {
+	return NewExporterWithLogConfig(endpoint, scrapeTimeout, "", 5*time.Minute)
+}
+
+// Creates a new Xray exporter with custom log parsing configuration.
+// Pass empty logPath to disable user metrics from log parsing.
+func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, logPath string, logTimeWindow time.Duration) (*Exporter, error) {
 	e := Exporter{
 		endpoint:      endpoint,
 		scrapeTimeout: scrapeTimeout,
 		registry:      prometheus.NewRegistry(),
+		logPath:       logPath,
+		logTimeWindow: logTimeWindow,
 
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "xray",
@@ -39,60 +60,108 @@ func NewExporter(endpoint string, scrapeTimeout time.Duration) (*Exporter, error
 		}),
 	}
 
+	// Initialize all metric descriptions
 	e.metricDescriptions = map[string]*prometheus.Desc{}
 
 	for k, desc := range map[string]struct {
 		txt  string
 		lbls []string
 	}{
+		// Core Xray metrics
 		"up":                           {txt: "Indicate scrape succeeded or not"},
 		"scrape_duration_seconds":      {txt: "Scrape duration in seconds"},
 		"uptime_seconds":               {txt: "Xray uptime in seconds"},
 		"traffic_uplink_bytes_total":   {txt: "Number of transmitted bytes", lbls: []string{"dimension", "target"}},
 		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
+
+		// User activity metrics from log parsing
+		"unique_users":       {txt: "Number of unique users in time window"},
+		"total_connections":  {txt: "Total number of connections in time window"},
+		"blocked_requests":   {txt: "Number of blocked requests in time window"},
+		"blocked_percentage": {txt: "Percentage of blocked requests"},
 	} {
 		e.metricDescriptions[k] = e.newMetricDescr(k, desc.txt, desc.lbls)
 	}
 
 	e.registry.MustRegister(&e)
 
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Create simple gRPC connection
+	// No keepalive needed for short, infrequent calls every 15-30s
+	conn, err := grpc.NewClient(endpoint,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %w", err)
+		return nil, fmt.Errorf("failed to create gRPC client: %w", err)
 	}
 
 	e.conn = conn
 
+	// Initialize log parser if path provided
+	if logPath != "" && logPath != "disabled" {
+		if _, err := os.Stat(logPath); err != nil {
+			logrus.WithError(err).Warn("Log file not found, user metrics will not be available")
+		} else {
+			parser, err := logparser.NewParser(logparser.Config{
+				LogPath:    logPath,
+				TimeWindow: logTimeWindow,
+			})
+			if err != nil {
+				logrus.WithError(err).Warn("Failed to create log parser")
+			} else {
+				e.logParser = parser
+				if err := e.logParser.Start(); err != nil {
+					logrus.WithError(err).Warn("Failed to start log parser")
+				} else {
+					logrus.Info("Log parser started successfully")
+				}
+			}
+		}
+	}
+
 	return &e, nil
 }
 
+// Implements prometheus.Collector interface - gathers all metrics from Xray and log sources.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	e.Lock()
-	defer e.Unlock()
 	e.totalScrapes.Inc()
-
 	start := time.Now()
 
+	// Attempt to scrape Xray metrics via gRPC
 	var up float64 = 1
 	if err := e.scrapeXray(ch); err != nil {
 		up = 0
 		logrus.WithError(err).Warn("Scrape failed")
 	}
 
+	// Collect log-based metrics
+	e.collectLogMetrics(ch)
+	e.collectDomainMetrics(ch)
+	e.collectOutboundMetrics(ch)
+
+	// Core metrics
 	e.registerConstMetricGauge(ch, "up", up)
 	e.registerConstMetricGauge(ch, "scrape_duration_seconds", time.Since(start).Seconds())
 
 	ch <- e.totalScrapes
 }
 
+// Implements prometheus.Collector interface - describes all metrics this collector can produce.
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range e.metricDescriptions {
 		ch <- desc
 	}
 
 	ch <- e.totalScrapes.Desc()
+
+	ch <- prometheus.NewDesc(
+		prometheus.BuildFQName("xray", "", "requested_domain_ip_total"),
+		"Total number of requests per domain or IP",
+		[]string{"target"},
+		nil,
+	)
 }
 
+// Connects to Xray's gRPC API and collects all available metrics.
 func (e *Exporter) scrapeXray(ch chan<- prometheus.Metric) error {
 	ctx, cancel := context.WithTimeout(context.Background(), e.scrapeTimeout)
 	defer cancel()
@@ -110,14 +179,18 @@ func (e *Exporter) scrapeXray(ch chan<- prometheus.Metric) error {
 	return nil
 }
 
+// Collects traffic statistics from Xray's stats API.
 func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := client.QueryStats(ctx, &command.QueryStatsRequest{Reset_: false})
+	resp, err := e.callWithRetry(func() (interface{}, error) {
+		return client.QueryStats(ctx, &command.QueryStatsRequest{Reset_: false})
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get stats: %w", err)
 	}
 
-	for _, s := range resp.GetStat() {
-		// example value: inbound>>>socks-proxy>>>traffic>>>uplink
+	statsResp := resp.(*command.QueryStatsResponse)
+	for _, s := range statsResp.GetStat() {
+		// Parse format: inbound>>>socks-proxy>>>traffic>>>uplink
 		p := strings.Split(s.GetName(), ">>>")
 		metric := p[2] + "_" + p[3] + "_bytes_total"
 		dimension := p[0]
@@ -129,33 +202,55 @@ func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.M
 	return nil
 }
 
+// Collects system runtime metrics from Xray.
 func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := client.GetSysStats(ctx, &command.SysStatsRequest{})
+	resp, err := e.callWithRetry(func() (interface{}, error) {
+		return client.GetSysStats(ctx, &command.SysStatsRequest{})
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get sys stats: %w", err)
 	}
 
-	e.registerConstMetricGauge(ch, "uptime_seconds", float64(resp.GetUptime()))
+	sysResp := resp.(*command.SysStatsResponse)
+	e.registerConstMetricGauge(ch, "uptime_seconds", float64(sysResp.GetUptime()))
 
-	// We followed the naming style of Go collector from Prometheus.
-	// See: https://github.com/prometheus/client_golang/blob/master/prometheus/go_collector.go
-	e.registerConstMetricGauge(ch, "goroutines", float64(resp.GetNumGoroutine()))
-	e.registerConstMetricGauge(ch, "memstats_alloc_bytes", float64(resp.GetAlloc()))
-	e.registerConstMetricGauge(ch, "memstats_alloc_bytes_total", float64(resp.GetTotalAlloc()))
-	e.registerConstMetricGauge(ch, "memstats_sys_bytes", float64(resp.GetSys()))
-	e.registerConstMetricGauge(ch, "memstats_mallocs_total", float64(resp.GetMallocs()))
-	e.registerConstMetricGauge(ch, "memstats_frees_total", float64(resp.GetFrees()))
+	// Memory and runtime metrics following Go collector naming conventions
+	e.registerConstMetricGauge(ch, "goroutines", float64(sysResp.GetNumGoroutine()))
+	e.registerConstMetricGauge(ch, "memstats_alloc_bytes", float64(sysResp.GetAlloc()))
+	e.registerConstMetricGauge(ch, "memstats_alloc_bytes_total", float64(sysResp.GetTotalAlloc()))
+	e.registerConstMetricGauge(ch, "memstats_sys_bytes", float64(sysResp.GetSys()))
+	e.registerConstMetricGauge(ch, "memstats_mallocs_total", float64(sysResp.GetMallocs()))
+	e.registerConstMetricGauge(ch, "memstats_frees_total", float64(sysResp.GetFrees()))
 
-	// The metric live_objects was removed. You may calculate it in Prometheus using:
-	// memstats_live_objects_total = memstats_mallocs_total - memstats_frees_total
-	// See: https://prometheus.io/docs/instrumenting/writing_exporters/#drop-less-useful-statistics
-
-	// These metrics below are not directly exposed by Go collector.
-	// Therefore, we only add the "memstats_" prefix without changing their original names.
-	e.registerConstMetricGauge(ch, "memstats_num_gc", float64(resp.GetNumGC()))
-	e.registerConstMetricGauge(ch, "memstats_pause_total_ns", float64(resp.GetPauseTotalNs()))
+	// Additional memory metrics not in standard Go collector
+	e.registerConstMetricGauge(ch, "memstats_num_gc", float64(sysResp.GetNumGC()))
+	e.registerConstMetricGauge(ch, "memstats_pause_total_ns", float64(sysResp.GetPauseTotalNs()))
 
 	return nil
+}
+
+// Implements exponential backoff retry for gRPC calls.
+// Helps handle temporary network issues or Xray restarts.
+func (e *Exporter) callWithRetry(fn func() (interface{}, error)) (interface{}, error) {
+	maxRetries := 3
+	baseDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		resp, err := fn()
+		if err == nil {
+			return resp, nil
+		}
+
+		if attempt == maxRetries-1 {
+			return nil, err
+		}
+
+		delay := baseDelay * time.Duration(1<<attempt)
+		logrus.WithError(err).WithField("attempt", attempt+1).WithField("delay", delay).Debug("gRPC call failed, retrying")
+		time.Sleep(delay)
+	}
+
+	return nil, fmt.Errorf("max retries exceeded")
 }
 
 func (e *Exporter) registerConstMetricGauge(ch chan<- prometheus.Metric, metric string, val float64, labels ...string) {
@@ -183,8 +278,84 @@ func (e *Exporter) newMetricDescr(metricName string, docString string, labels []
 	return prometheus.NewDesc(prometheus.BuildFQName("xray", "", metricName), docString, labels, nil)
 }
 
-// Close properly closes the gRPC connection
+// Collects user activity metrics from log parser.
+func (e *Exporter) collectLogMetrics(ch chan<- prometheus.Metric) {
+	if e.logParser == nil {
+		return
+	}
+
+	uniqueUsers, totalConns, blockedConns := e.logParser.GetMetrics()
+
+	e.registerConstMetricGauge(ch, "unique_users", float64(uniqueUsers))
+	e.registerConstMetricGauge(ch, "total_connections", float64(totalConns))
+	e.registerConstMetricCounter(ch, "blocked_requests", float64(blockedConns))
+}
+
+// Collects domain and IP request statistics from log parser.
+func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
+	if e.logParser == nil {
+		return
+	}
+
+	domainCounts := e.logParser.GetDomainCounts()
+	ipCounts := e.logParser.GetIPCounts()
+
+	metricDesc := prometheus.NewDesc(
+		prometheus.BuildFQName("xray", "", "requested_domain_ip_total"),
+		"Total number of requests per domain or IP",
+		[]string{"target"},
+		nil,
+	)
+
+	for domain, count := range domainCounts {
+		ch <- prometheus.MustNewConstMetric(
+			metricDesc,
+			prometheus.CounterValue,
+			float64(count),
+			domain,
+		)
+	}
+
+	for ip, count := range ipCounts {
+		ch <- prometheus.MustNewConstMetric(
+			metricDesc,
+			prometheus.CounterValue,
+			float64(count),
+			ip,
+		)
+	}
+}
+
+// Collects outbound routing statistics from log parser.
+func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
+	if e.logParser == nil {
+		return
+	}
+
+	outboundCounts := e.logParser.GetOutboundCounts()
+
+	metricDesc := prometheus.NewDesc(
+		prometheus.BuildFQName("xray", "", "outbound_requests_total"),
+		"Total number of requests per outbound",
+		[]string{"outbound"},
+		nil,
+	)
+
+	for outbound, count := range outboundCounts {
+		ch <- prometheus.MustNewConstMetric(
+			metricDesc,
+			prometheus.CounterValue,
+			float64(count),
+			outbound,
+		)
+	}
+}
+
+// Properly closes gRPC connection and stops log parser.
 func (e *Exporter) Close() error {
+	if e.logParser != nil {
+		e.logParser.Stop()
+	}
 	if e.conn != nil {
 		return e.conn.Close()
 	}
