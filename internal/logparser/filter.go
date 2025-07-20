@@ -33,7 +33,7 @@ func NewIPFilter() *IPFilter {
 		systemIPs:    make(map[string]bool),
 		dnsServers:   make(map[string]bool),
 		cache:        make(map[string]cacheEntry),
-		maxCacheSize: 10000,
+		maxCacheSize: 100000,
 		cacheCounter: 0,
 	}
 
