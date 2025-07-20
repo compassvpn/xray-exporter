@@ -19,14 +19,14 @@ import (
 
 // Cardinality limits to prevent excessive metric series
 const (
-	MaxTrackedDomains   = 20 // Keep only top 20 domains for pie chart
+	MaxTrackedDomains   = 50 // Keep only top 50 domains for pie chart
 	MaxTrackedIPs       = 20 // Keep only top 20 IPs for pie chart
 	MaxTrackedOutbounds = 10 // Keep only top 10 outbounds
 
 	// Emergency cleanup thresholds to prevent unlimited growth
-	MaxDomainsBeforeCleanup   = 30 // Force cleanup if domains exceed this (small buffer)
-	MaxIPsBeforeCleanup       = 30 // Force cleanup if IPs exceed this (small buffer)
-	MaxOutboundsBeforeCleanup = 15 // Force cleanup if outbounds exceed this
+	MaxDomainsBeforeCleanup   = 100 // Force cleanup if domains exceed this (small buffer)
+	MaxIPsBeforeCleanup       = 40  // Force cleanup if IPs exceed this (small buffer)
+	MaxOutboundsBeforeCleanup = 20  // Force cleanup if outbounds exceed this
 )
 
 // Represents a parsed line from the Xray access log.
@@ -209,13 +209,13 @@ func NewParser(config Config) (*Parser, error) {
 	var bufferCap int
 	switch {
 	case minutes <= 5:
-		bufferCap = 50000 // Short windows: 50K entries (~1.2MB)
+		bufferCap = 500000 // Short windows: 500K entries (~12MB)
 	case minutes <= 10:
-		bufferCap = 100000 // Medium windows: 100K entries (~2.4MB)
+		bufferCap = 1000000 // Medium windows: 1M entries (~24MB)
 	case minutes <= 30:
-		bufferCap = 200000 // Long windows: 200K entries (~4.8MB)
+		bufferCap = 2000000 // Long windows: 2M entries (~48MB)
 	default:
-		bufferCap = 500000 // Very long windows: 500K entries (~12MB)
+		bufferCap = 5000000 // Very long windows: 5M entries (~120MB)
 	}
 
 	parser := &Parser{
