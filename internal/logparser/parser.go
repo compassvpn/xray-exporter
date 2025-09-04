@@ -78,7 +78,7 @@ var (
 	timestampRegex   = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})`)
 	newFormatIPRegex = regexp.MustCompile(`from (?:tcp:)?(\d+\.\d+\.\d+\.\d+|\S+):`)
 	oldFormatIPRegex = regexp.MustCompile(`from (?:\[([0-9a-fA-F:]+)\]|(\d+\.\d+\.\d+\.\d+)):`)
-	outboundRegex    = regexp.MustCompile(`\[.* -> ([^]]+)\]`)
+	outboundRegex    = regexp.MustCompile(`\[[^\]]*?(?:->|>>)\s*([^\]]+?)\]`)
 )
 
 // Performs quick checks to skip obviously invalid lines before expensive parsing.
@@ -129,7 +129,7 @@ func extractOutbound(line string) string {
 		return ""
 	}
 
-	return match[1]
+	return strings.TrimSpace(match[1])
 }
 
 // Adds a timestamp to the circular buffer.
