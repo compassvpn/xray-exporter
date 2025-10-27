@@ -63,7 +63,7 @@ jobs:
         chmod +x "dist/${BINARY}"
         
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: xray-exporter-${{ matrix.goos }}-${{ matrix.goarch }}
         path: dist/
