@@ -14,6 +14,8 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+
+	"xray-exporter/internal/geoip"
 )
 
 // Command line configuration
@@ -62,6 +64,11 @@ func main() {
 
 	if opts.Version {
 		return
+	}
+
+	// Download GeoLite2 databases on startup
+	if err := geoip.DownloadDB(); err != nil {
+		logrus.WithError(err).Fatal("Failed to initialize GeoIP database")
 	}
 
 	// Initialize exporter with configuration
