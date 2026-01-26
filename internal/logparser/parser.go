@@ -6,6 +6,7 @@ package logparser
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oschwald/geoip2-golang"
 	"github.com/sirupsen/logrus"
 )
 
@@ -21,18 +23,27 @@ import (
 const (
 	MaxTrackedDomains   = 50 // Keep only top 50 domains for pie chart
 	MaxTrackedIPs       = 20 // Keep only top 20 IPs for pie chart
+	MaxTrackedSubnets   = 50 // Keep only top 50 /24 subnets
 	MaxTrackedOutbounds = 10 // Keep only top 10 outbounds
+	MaxTrackedASNs      = 50 // Keep only top 50 ASNs
+	MaxTrackedCountries = 50 // Keep only top 50 countries
+	MaxTrackedCities    = 50 // Keep only top 50 cities
 
 	// Emergency cleanup thresholds to prevent unlimited growth
 	MaxDomainsBeforeCleanup   = 100 // Force cleanup if domains exceed this (small buffer)
 	MaxIPsBeforeCleanup       = 40  // Force cleanup if IPs exceed this (small buffer)
+	MaxSubnetsBeforeCleanup   = 100 // Force cleanup if subnets exceed this
 	MaxOutboundsBeforeCleanup = 20  // Force cleanup if outbounds exceed this
+	MaxASNsBeforeCleanup      = 100
+	MaxCountriesBeforeCleanup = 100
+	MaxCitiesBeforeCleanup    = 100
 )
 
 // Represents a parsed line from the Xray access log.
 type LogEntry struct {
 	Timestamp time.Time
 	IP        string
+	ParsedIP  net.IP
 	Domain    string
 }
 
@@ -42,7 +53,11 @@ type MetricsData struct {
 	UniqueIPs      map[string]time.Time // IP -> last seen time
 	DomainCounts   map[string]int64     // domain -> total request count
 	IPCounts       map[string]int64     // direct IP requests -> total count
+	Subnet24Counts map[string]int64     // /24 subnet -> total request count
 	OutboundCounts map[string]int64     // outbound -> total request count
+	ASNCounts      map[string]int64     // ASN -> total request count (labels: asn, org)
+	CountryCounts  map[string]int64     // country -> total request count (labels: country)
+	CityCounts     map[string]int64     // city -> total request count (labels: city, country)
 
 	// Circular buffer for connection timestamps to limit memory usage
 	ConnectionTimestamps []time.Time // circular buffer of connection timestamps
@@ -65,12 +80,20 @@ type Parser struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	mu         sync.Mutex
+
+	// GeoIP readers for real-time tracking
+	asnReader     *geoip2.Reader
+	countryReader *geoip2.Reader
+	cityReader    *geoip2.Reader
 }
 
 // Configuration options for the log parser.
 type Config struct {
-	LogPath    string
-	TimeWindow time.Duration
+	LogPath       string
+	TimeWindow    time.Duration
+	ASNReader     *geoip2.Reader
+	CountryReader *geoip2.Reader
+	CityReader    *geoip2.Reader
 }
 
 // Regular expressions for parsing different log line formats
@@ -155,7 +178,11 @@ func (p *Parser) trimToTopN() {
 
 	p.metrics.DomainCounts = keepTopN(p.metrics.DomainCounts, MaxTrackedDomains)
 	p.metrics.IPCounts = keepTopN(p.metrics.IPCounts, MaxTrackedIPs)
+	p.metrics.Subnet24Counts = keepTopN(p.metrics.Subnet24Counts, MaxTrackedSubnets)
 	p.metrics.OutboundCounts = keepTopN(p.metrics.OutboundCounts, MaxTrackedOutbounds)
+	p.metrics.ASNCounts = keepTopN(p.metrics.ASNCounts, MaxTrackedASNs)
+	p.metrics.CountryCounts = keepTopN(p.metrics.CountryCounts, MaxTrackedCountries)
+	p.metrics.CityCounts = keepTopN(p.metrics.CityCounts, MaxTrackedCities)
 }
 
 // Emergency cleanup if maps grow too large between regular cleanups
@@ -163,7 +190,11 @@ func (p *Parser) checkEmergencyCleanup() {
 	p.metrics.mu.RLock()
 	needCleanup := len(p.metrics.DomainCounts) > MaxDomainsBeforeCleanup ||
 		len(p.metrics.IPCounts) > MaxIPsBeforeCleanup ||
-		len(p.metrics.OutboundCounts) > MaxOutboundsBeforeCleanup
+		len(p.metrics.Subnet24Counts) > MaxSubnetsBeforeCleanup ||
+		len(p.metrics.OutboundCounts) > MaxOutboundsBeforeCleanup ||
+		len(p.metrics.ASNCounts) > MaxASNsBeforeCleanup ||
+		len(p.metrics.CountryCounts) > MaxCountriesBeforeCleanup ||
+		len(p.metrics.CityCounts) > MaxCitiesBeforeCleanup
 	p.metrics.mu.RUnlock()
 
 	if needCleanup {
@@ -219,14 +250,21 @@ func NewParser(config Config) (*Parser, error) {
 	}
 
 	parser := &Parser{
-		logPath:    config.LogPath,
-		timeWindow: config.TimeWindow,
-		ipFilter:   NewIPFilter(),
+		logPath:       config.LogPath,
+		timeWindow:    config.TimeWindow,
+		ipFilter:      NewIPFilter(),
+		asnReader:     config.ASNReader,
+		countryReader: config.CountryReader,
+		cityReader:    config.CityReader,
 		metrics: &MetricsData{
 			UniqueIPs:            make(map[string]time.Time),
 			DomainCounts:         make(map[string]int64),
 			IPCounts:             make(map[string]int64),
+			Subnet24Counts:       make(map[string]int64),
 			OutboundCounts:       make(map[string]int64),
+			ASNCounts:            make(map[string]int64),
+			CountryCounts:        make(map[string]int64),
+			CityCounts:           make(map[string]int64),
 			ConnectionTimestamps: make([]time.Time, bufferCap),
 			ConnectionsBufHead:   0,
 			ConnectionsBufSize:   0,
@@ -318,6 +356,18 @@ func (p *Parser) GetIPCounts() map[string]int64 {
 	return result
 }
 
+// Returns a copy of current subnet request counts.
+func (p *Parser) GetSubnet24Counts() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	result := make(map[string]int64, len(p.metrics.Subnet24Counts))
+	for subnet, count := range p.metrics.Subnet24Counts {
+		result[subnet] = count
+	}
+	return result
+}
+
 // Returns a copy of current outbound request counts.
 // These are cumulative counters since parser startup.
 func (p *Parser) GetOutboundCounts() map[string]int64 {
@@ -327,6 +377,42 @@ func (p *Parser) GetOutboundCounts() map[string]int64 {
 	result := make(map[string]int64, len(p.metrics.OutboundCounts))
 	for outbound, count := range p.metrics.OutboundCounts {
 		result[outbound] = count
+	}
+	return result
+}
+
+// Returns a copy of current ASN request counts.
+func (p *Parser) GetASNCounts() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	result := make(map[string]int64, len(p.metrics.ASNCounts))
+	for asn, count := range p.metrics.ASNCounts {
+		result[asn] = count
+	}
+	return result
+}
+
+// Returns a copy of current country request counts.
+func (p *Parser) GetCountryCounts() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	result := make(map[string]int64, len(p.metrics.CountryCounts))
+	for country, count := range p.metrics.CountryCounts {
+		result[country] = count
+	}
+	return result
+}
+
+// Returns a copy of current city request counts.
+func (p *Parser) GetCityCounts() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	result := make(map[string]int64, len(p.metrics.CityCounts))
+	for city, count := range p.metrics.CityCounts {
+		result[city] = count
 	}
 	return result
 }
@@ -458,6 +544,45 @@ func (p *Parser) parseLogFile() error {
 		p.addConnectionTimestamp(entry.Timestamp)
 		// Track unique IPs with last seen time
 		p.metrics.UniqueIPs[entry.IP] = entry.Timestamp
+
+		// Track /24 subnet counts
+		subnet := getSubnet24(entry.ParsedIP)
+		if subnet != "" {
+			p.metrics.Subnet24Counts[subnet]++
+		}
+
+		// Track ASN, Country, and City if readers are available
+		if p.asnReader != nil {
+			if record, err := p.asnReader.ASN(entry.ParsedIP); err == nil {
+				asnKey := fmt.Sprintf("%d|%s", record.AutonomousSystemNumber, record.AutonomousSystemOrganization)
+				p.metrics.ASNCounts[asnKey]++
+			}
+		}
+
+		// Use City reader for both City and Country if available
+		if p.cityReader != nil {
+			if record, err := p.cityReader.City(entry.ParsedIP); err == nil {
+				countryCode := record.Country.IsoCode
+				if countryCode == "" {
+					countryCode = "unknown"
+				}
+				p.metrics.CountryCounts[countryCode]++
+
+				cityName := record.City.Names["en"]
+				if cityName != "" {
+					cityKey := fmt.Sprintf("%s|%s", cityName, countryCode)
+					p.metrics.CityCounts[cityKey]++
+				}
+			}
+		} else if p.countryReader != nil {
+			// Fallback to Country reader if City is not available
+			if record, err := p.countryReader.Country(entry.ParsedIP); err == nil {
+				countryCode := record.Country.IsoCode
+				if countryCode != "" {
+					p.metrics.CountryCounts[countryCode]++
+				}
+			}
+		}
 	}
 
 	// Update file position for next read
@@ -507,6 +632,7 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 		return nil, nil // Skip invalid IPs
 	}
 	entry.IP = normalizedIP
+	entry.ParsedIP = net.ParseIP(normalizedIP)
 
 	// Extract domain for entry (just for reference, actual tracking done later)
 	// Use optimized domain extraction that reuses already parsed line components
@@ -585,3 +711,23 @@ func normalizeIP(ip string) string {
 
 	return ""
 }
+
+// getSubnet24 masks an IP address to its /24 prefix (IPv4) or /48 prefix (IPv6).
+func getSubnet24(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+
+	if ipv4 := ip.To4(); ipv4 != nil {
+		// IPv4: mask to /24 (first 3 bytes)
+		return fmt.Sprintf("%d.%d.%d.0/24", ipv4[0], ipv4[1], ipv4[2])
+	}
+
+	// IPv6: mask to /48 (first 6 bytes) as a sensible equivalent for aggregation
+	if len(ip) >= 6 {
+		return fmt.Sprintf("%02x%02x:%02x%02x:%02x%02x::/48",
+			ip[0], ip[1], ip[2], ip[3], ip[4], ip[5])
+	}
+	return ""
+}
+
