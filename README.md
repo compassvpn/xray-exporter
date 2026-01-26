@@ -8,6 +8,7 @@ An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and expo
 - **Traffic Statistics**: Per-user, per-inbound, per-outbound data transfer metrics  
 - **User Activity Metrics**: Real-time user counts, connection patterns
 - **Domain Analytics**: Most requested domains and direct IP access tracking
+- **GeoIP Intelligence**: Automated Top ASNs, Countries, and Cities tracking with auto-downloading databases
 - **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
 - **High Performance**: Optimized log parsing with circular buffers and LRU caching
 - **Auto-scaling**: Adaptive memory usage based on traffic patterns
@@ -167,6 +168,15 @@ To get user activity metrics, enable access logging in your Xray config:
 
 The exporter will automatically parse this log file to provide additional metrics about user activity, popular domains, and traffic patterns.
 
+### GeoIP Tracking
+
+The exporter automatically downloads and maintains the latest GeoLite2 databases (ASN, Country, City) from [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb) on startup. No manual setup is required.
+
+These databases enable high-precision tracking of:
+- **Top ASNs**: Identify which networks your users are coming from.
+- **Top Countries**: See geographic distribution by country.
+- **Top Cities**: Granular city-level connection statistics.
+
 ### Start the Exporter
 
 ```bash
@@ -270,7 +280,11 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 | `xray_unique_users` | Number of unique users active in the time window | - |
 | `xray_total_connections` | Total number of connections in the time window | - |
 | `xray_requested_domain_ip_total` | Total requests per domain or IP address | `target` |
-| `xray_outbound_requests_total` | Total requests per outbound connection (includes blocked requests) | `outbound` |
+| `xray_outbound_requests_total` | Total requests per outbound connection | `outbound` |
+| `xray_top_asns_total` | Total requests per ASN | `asn`, `org` |
+| `xray_top_countries_total` | Total requests per country | `country` |
+| `xray_top_cities_total` | Total requests per city | `city`, `country` |
+| `xray_client_subnet_total` | Requests per client /24 (IPv4) or /48 (IPv6) subnet | `subnet`, `asn`, `org`, `country`, `city` |
 
 ### Core Metrics
 
@@ -279,6 +293,14 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 | `xray_up` | Whether the last scrape was successful (1 = success, 0 = failure) |
 | `xray_scrape_duration_seconds` | Time spent scraping metrics from Xray |
 | `xray_scrapes_total` | Total number of scrapes performed |
+
+### Recommended Grafana Queries
+
+Use these queries to visualize the new GeoIP metrics:
+
+- **Top 10 ASNs**: `topk(10, sum by (asn, org) (increase(xray_top_asns_total[$__range])))`
+- **Top 10 Countries**: `topk(10, sum by (country) (increase(xray_top_countries_total[$__range])))`
+- **Top 10 Cities**: `topk(10, sum by (city, country) (increase(xray_top_cities_total[$__range])))`
 
 ## Performance & Scalability
 
