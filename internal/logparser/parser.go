@@ -527,7 +527,6 @@ func (p *Parser) parseLogFile() error {
 		p.metrics.UniqueIPs[entry.IP] = entry.Timestamp
 
 		// Extract context for detailed tracking
-		subnet := getSubnet24(entry.ParsedIP)
 		countryCode := "unknown"
 		cityName := "unknown"
 		asn := "unknown"
@@ -718,4 +717,3 @@ func getSubnet24(ip net.IP) string {
 	}
 	return ""
 }
-
