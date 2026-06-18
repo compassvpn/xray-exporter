@@ -2,10 +2,11 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -286,11 +287,11 @@ func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheu
 
 // Implements exponential backoff retry for gRPC calls.
 // Helps handle temporary network issues or Xray restarts.
-func (e *Exporter) callWithRetry(fn func() (interface{}, error)) (interface{}, error) {
+func (e *Exporter) callWithRetry(fn func() (any, error)) (any, error) {
 	maxRetries := 3
 	baseDelay := 100 * time.Millisecond
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		resp, err := fn()
 		if err == nil {
 			return resp, nil
@@ -333,6 +334,26 @@ func (e *Exporter) newMetricDescr(metricName string, docString string, labels []
 	return prometheus.NewDesc(prometheus.BuildFQName("xray", "", metricName), docString, labels, nil)
 }
 
+// Pairs a metric key with its count for top-N sorting.
+type countEntry struct {
+	key   string
+	count int64
+}
+
+// Returns the n entries with the highest counts, sorted descending.
+// If the map has fewer than n entries, all of them are returned.
+// This bounds metric cardinality (e.g. only the top domains are exported).
+func topN(counts map[string]int64, n int) []countEntry {
+	entries := make([]countEntry, 0, len(counts))
+	for key, count := range counts {
+		entries = append(entries, countEntry{key: key, count: count})
+	}
+	slices.SortFunc(entries, func(a, b countEntry) int {
+		return cmp.Compare(b.count, a.count)
+	})
+	return entries[:min(n, len(entries))]
+}
+
 // Collects user activity metrics from log parser.
 func (e *Exporter) collectLogMetrics(ch chan<- prometheus.Metric) {
 	if e.logParser == nil {
@@ -351,9 +372,6 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	domainCounts := e.logParser.GetDomainCounts()
-	ipCounts := e.logParser.GetIPCounts()
-
 	metricDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("xray", "", "requested_domain_ip_total"),
 		"Total number of requests per domain or IP",
@@ -361,66 +379,12 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 		nil,
 	)
 
-	// Only export top 20 domains to prevent cardinality leak
-	domainEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(domainCounts))
-	for domain, count := range domainCounts {
-		domainEntries = append(domainEntries, struct {
-			key   string
-			count int64
-		}{domain, count})
+	// Only export the top domains and IPs to prevent cardinality leak
+	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
 	}
-
-	// Sort by count (descending) and take only top N
-	sort.Slice(domainEntries, func(i, j int) bool {
-		return domainEntries[i].count > domainEntries[j].count
-	})
-
-	maxDomains := logparser.MaxTrackedDomains
-	if len(domainEntries) < maxDomains {
-		maxDomains = len(domainEntries)
-	}
-
-	for i := 0; i < maxDomains; i++ {
-		ch <- prometheus.MustNewConstMetric(
-			metricDesc,
-			prometheus.CounterValue,
-			float64(domainEntries[i].count),
-			domainEntries[i].key,
-		)
-	}
-
-	// Only export top IPs to prevent cardinality leak
-	ipEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(ipCounts))
-	for ip, count := range ipCounts {
-		ipEntries = append(ipEntries, struct {
-			key   string
-			count int64
-		}{ip, count})
-	}
-
-	// Sort by count (descending) and take only top N
-	sort.Slice(ipEntries, func(i, j int) bool {
-		return ipEntries[i].count > ipEntries[j].count
-	})
-
-	maxIPs := logparser.MaxTrackedIPs
-	if len(ipEntries) < maxIPs {
-		maxIPs = len(ipEntries)
-	}
-
-	for i := 0; i < maxIPs; i++ {
-		ch <- prometheus.MustNewConstMetric(
-			metricDesc,
-			prometheus.CounterValue,
-			float64(ipEntries[i].count),
-			ipEntries[i].key,
-		)
+	for _, entry := range topN(e.logParser.GetIPCounts(), logparser.MaxTrackedIPs) {
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
 	}
 }
 
@@ -430,8 +394,6 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	outboundCounts := e.logParser.GetOutboundCounts()
-
 	metricDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("xray", "", "outbound_requests_total"),
 		"Total number of requests per outbound",
@@ -439,35 +401,9 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 		nil,
 	)
 
-	// Only export top 10 outbounds to prevent cardinality leak
-	outboundEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(outboundCounts))
-	for outbound, count := range outboundCounts {
-		outboundEntries = append(outboundEntries, struct {
-			key   string
-			count int64
-		}{outbound, count})
-	}
-
-	// Sort by count (descending) and take only top N
-	sort.Slice(outboundEntries, func(i, j int) bool {
-		return outboundEntries[i].count > outboundEntries[j].count
-	})
-
-	maxOutbounds := logparser.MaxTrackedOutbounds
-	if len(outboundEntries) < maxOutbounds {
-		maxOutbounds = len(outboundEntries)
-	}
-
-	for i := 0; i < maxOutbounds; i++ {
-		ch <- prometheus.MustNewConstMetric(
-			metricDesc,
-			prometheus.CounterValue,
-			float64(outboundEntries[i].count),
-			outboundEntries[i].key,
-		)
+	// Only export the top outbounds to prevent cardinality leak
+	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
 	}
 }
 
@@ -477,37 +413,15 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	asnCounts := e.logParser.GetASNCounts()
-	asnEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(asnCounts))
-	for asn, count := range asnCounts {
-		asnEntries = append(asnEntries, struct {
-			key   string
-			count int64
-		}{asn, count})
-	}
-
-	sort.Slice(asnEntries, func(i, j int) bool {
-		return asnEntries[i].count > asnEntries[j].count
-	})
-
-	maxASNs := logparser.MaxTrackedASNs
-	if len(asnEntries) < maxASNs {
-		maxASNs = len(asnEntries)
-	}
-
-	for i := 0; i < maxASNs; i++ {
-		parts := strings.Split(asnEntries[i].key, "|")
+	for _, entry := range topN(e.logParser.GetASNCounts(), logparser.MaxTrackedASNs) {
+		// Key format: asn|org
+		parts := strings.Split(entry.key, "|")
 		asn := parts[0]
 		org := ""
-
 		if len(parts) > 1 {
 			org = parts[1]
 		}
-
-		e.registerConstMetricCounter(ch, "asns_total", float64(asnEntries[i].count), asn, org)
+		e.registerConstMetricCounter(ch, "asns_total", float64(entry.count), asn, org)
 	}
 }
 
@@ -517,29 +431,8 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	countryCounts := e.logParser.GetCountryCounts()
-	countryEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(countryCounts))
-	for country, count := range countryCounts {
-		countryEntries = append(countryEntries, struct {
-			key   string
-			count int64
-		}{country, count})
-	}
-
-	sort.Slice(countryEntries, func(i, j int) bool {
-		return countryEntries[i].count > countryEntries[j].count
-	})
-
-	maxCountries := logparser.MaxTrackedCountries
-	if len(countryEntries) < maxCountries {
-		maxCountries = len(countryEntries)
-	}
-
-	for i := 0; i < maxCountries; i++ {
-		e.registerConstMetricCounter(ch, "countries_total", float64(countryEntries[i].count), countryEntries[i].key)
+	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
+		e.registerConstMetricCounter(ch, "countries_total", float64(entry.count), entry.key)
 	}
 }
 
@@ -549,35 +442,15 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	cityCounts := e.logParser.GetCityCounts()
-	cityEntries := make([]struct {
-		key   string
-		count int64
-	}, 0, len(cityCounts))
-	for city, count := range cityCounts {
-		cityEntries = append(cityEntries, struct {
-			key   string
-			count int64
-		}{city, count})
-	}
-
-	sort.Slice(cityEntries, func(i, j int) bool {
-		return cityEntries[i].count > cityEntries[j].count
-	})
-
-	maxCities := logparser.MaxTrackedCities
-	if len(cityEntries) < maxCities {
-		maxCities = len(cityEntries)
-	}
-
-	for i := 0; i < maxCities; i++ {
-		parts := strings.Split(cityEntries[i].key, "|")
+	for _, entry := range topN(e.logParser.GetCityCounts(), logparser.MaxTrackedCities) {
+		// Key format: city|country
+		parts := strings.Split(entry.key, "|")
 		city := parts[0]
 		country := ""
 		if len(parts) > 1 {
 			country = parts[1]
 		}
-		e.registerConstMetricCounter(ch, "cities_total", float64(cityEntries[i].count), city, country)
+		e.registerConstMetricCounter(ch, "cities_total", float64(entry.count), city, country)
 	}
 }
 

@@ -34,7 +34,7 @@ func downloadWithRetry(name, url, path string) error {
 	maxRetries := 3
 	var lastErr error
 
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		logrus.Infof("Downloading GeoLite2-%s database (attempt %d/%d)...", name, i+1, maxRetries)
 		err := downloadFile(path, url)
 		if err == nil {
