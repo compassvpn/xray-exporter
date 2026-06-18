@@ -60,6 +60,8 @@ Application Options:
                                    (default: /var/log/xray/access.log)
   -w, --log-time-window=N          Time window in minutes for user metrics (default: 5)
       --version                    Display the version and exit
+      --log-level=LEVEL            Log level: error, warn, info, debug
+                                   (env: LOG_LEVEL) (default: warn)
 
 Help Options:
   -h, --help                       Show this help message

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ var opts struct {
 	LogPath                string `short:"p" long:"log-path" description:"Path to Xray access log file (empty to disable user metrics)" value-name:"PATH" default:"/var/log/xray/access.log"`
 	LogTimeWindowMinutes   int    `short:"w" long:"log-time-window" description:"Time window in minutes for user metrics" value-name:"N"`
 	Version                bool   `long:"version" description:"Display the version and exit"`
+	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: warn)" value-name:"LEVEL"`
 }
 
 // Build information injected during compilation
@@ -51,6 +53,36 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+// configureLogging sets the global logrus level. Precedence: the --log-level
+// flag, then the LOG_LEVEL env var, then "warn". Only error, warn, info, and
+// debug are accepted; anything else is non-fatal and falls back to warn, so a
+// typo never stops startup.
+func configureLogging(flagLevel string) {
+	levelStr := flagLevel
+	if levelStr == "" {
+		levelStr = os.Getenv("LOG_LEVEL")
+	}
+	if levelStr == "" {
+		levelStr = "warn"
+	}
+
+	var level logrus.Level
+	switch strings.ToLower(levelStr) {
+	case "error":
+		level = logrus.ErrorLevel
+	case "warn":
+		level = logrus.WarnLevel
+	case "info":
+		level = logrus.InfoLevel
+	case "debug":
+		level = logrus.DebugLevel
+	default:
+		logrus.Warnf("invalid log level %q, defaulting to warn", levelStr)
+		level = logrus.WarnLevel
+	}
+	logrus.SetLevel(level)
+}
+
 func main() {
 	// Parse command line arguments
 	if _, err := flags.Parse(&opts); err != nil {
@@ -60,7 +92,11 @@ func main() {
 		logrus.WithError(err).Fatal("Failed to parse flags")
 	}
 
-	logrus.Infof("Xray Exporter %v-%v (built %v)", buildVersion, buildCommit, buildDate)
+	configureLogging(opts.LogLevel)
+
+	// Print the identity banner directly so it is never hidden by the log level
+	// (the default is warn, which would otherwise suppress this and --version).
+	fmt.Printf("Xray Exporter %v-%v (built %v)\n", buildVersion, buildCommit, buildDate)
 
 	if opts.Version {
 		return
