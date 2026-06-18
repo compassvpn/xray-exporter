@@ -5,12 +5,14 @@ package logparser
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -211,14 +213,14 @@ func keepTopN(counts map[string]int64, n int) map[string]int64 {
 	}
 
 	// Sort by count (descending)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].count > entries[j].count
+	slices.SortFunc(entries, func(a, b countEntry) int {
+		return cmp.Compare(b.count, a.count)
 	})
 
 	// Keep only top N
 	result := make(map[string]int64, n)
-	for i := 0; i < n && i < len(entries); i++ {
-		result[entries[i].key] = entries[i].count
+	for _, entry := range entries[:n] {
+		result[entry.key] = entry.count
 	}
 
 	return result
@@ -330,11 +332,7 @@ func (p *Parser) GetDomainCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.DomainCounts))
-	for domain, count := range p.metrics.DomainCounts {
-		result[domain] = count
-	}
-	return result
+	return maps.Clone(p.metrics.DomainCounts)
 }
 
 // Returns a copy of current direct IP request counts.
@@ -342,11 +340,7 @@ func (p *Parser) GetIPCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.IPCounts))
-	for ip, count := range p.metrics.IPCounts {
-		result[ip] = count
-	}
-	return result
+	return maps.Clone(p.metrics.IPCounts)
 }
 
 // Returns a copy of current outbound request counts.
@@ -355,11 +349,7 @@ func (p *Parser) GetOutboundCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.OutboundCounts))
-	for outbound, count := range p.metrics.OutboundCounts {
-		result[outbound] = count
-	}
-	return result
+	return maps.Clone(p.metrics.OutboundCounts)
 }
 
 // Returns a copy of current ASN request counts.
@@ -367,11 +357,7 @@ func (p *Parser) GetASNCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.ASNCounts))
-	for asn, count := range p.metrics.ASNCounts {
-		result[asn] = count
-	}
-	return result
+	return maps.Clone(p.metrics.ASNCounts)
 }
 
 // Returns a copy of current country request counts.
@@ -379,11 +365,7 @@ func (p *Parser) GetCountryCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.CountryCounts))
-	for country, count := range p.metrics.CountryCounts {
-		result[country] = count
-	}
-	return result
+	return maps.Clone(p.metrics.CountryCounts)
 }
 
 // Returns a copy of current city request counts.
@@ -391,11 +373,7 @@ func (p *Parser) GetCityCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
 
-	result := make(map[string]int64, len(p.metrics.CityCounts))
-	for city, count := range p.metrics.CityCounts {
-		result[city] = count
-	}
-	return result
+	return maps.Clone(p.metrics.CityCounts)
 }
 
 // Continuously monitors the log file for changes and processes new entries.
