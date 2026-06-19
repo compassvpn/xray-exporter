@@ -27,6 +27,7 @@ var opts struct {
 	ScrapeTimeoutInSeconds int64  `short:"t" long:"scrape-timeout" description:"The timeout in seconds for every individual scrape" value-name:"N" default:"5"`
 	LogPath                string `short:"p" long:"log-path" description:"Path to Xray access log file (empty to disable user metrics)" value-name:"PATH" default:"/var/log/xray/access.log"`
 	LogTimeWindowMinutes   int    `short:"w" long:"log-time-window" description:"Time window in minutes for user metrics" value-name:"N"`
+	GeoIPDir               string `short:"g" long:"geoip-dir" description:"Directory for GeoLite2 databases" value-name:"PATH" default:"."`
 	Version                bool   `long:"version" description:"Display the version and exit"`
 	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: warn)" value-name:"LEVEL"`
 }
@@ -102,9 +103,11 @@ func main() {
 		return
 	}
 
-	// Download GeoLite2 databases on startup
+	// Download GeoLite2 databases on startup. GeoIP is optional enrichment, so a
+	// download failure is non-fatal: the exporter still serves core gRPC metrics.
+	geoip.Dir = opts.GeoIPDir
 	if err := geoip.DownloadDB(); err != nil {
-		logrus.WithError(err).Fatal("Failed to initialize GeoIP database")
+		logrus.WithError(err).Warn("Failed to initialize GeoIP database, GeoIP metrics will be unavailable")
 	}
 
 	// Initialize exporter with configuration
@@ -150,18 +153,26 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Start server in background
+	// Start server in background; a startup failure is routed back to main so the
+	// deferred cleanup (exporter.Close) still runs instead of os.Exit-ing here.
+	serverErr := make(chan error, 1)
 	go func() {
 		logrus.Infof("Server starting on %s", opts.Listen)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Fatal("Server failed to start")
+			serverErr <- err
 		}
 	}()
 
-	// Wait for shutdown signal
+	// Wait for a shutdown signal or a server startup error.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+
+	select {
+	case err := <-serverErr:
+		logrus.WithError(err).Error("Server failed to start")
+		return
+	case <-quit:
+	}
 
 	logrus.Info("Shutting down server...")
 

@@ -8,7 +8,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
@@ -30,7 +29,6 @@ const DefaultLogTimeWindowMinutes = 5
 // Connects to Xray's gRPC API for runtime stats and optionally parses
 // access logs for user activity metrics.
 type Exporter struct {
-	sync.Mutex
 	endpoint           string
 	scrapeTimeout      time.Duration
 	registry           *prometheus.Registry
@@ -47,11 +45,6 @@ type Exporter struct {
 	geoipASNReader     *geoip2.Reader
 	geoipCityReader    *geoip2.Reader
 	geoipCountryReader *geoip2.Reader
-}
-
-// Creates a new Xray exporter with default settings.
-func NewExporter(endpoint string, scrapeTimeout time.Duration) (*Exporter, error) {
-	return NewExporterWithLogConfig(endpoint, scrapeTimeout, "", DefaultLogTimeWindowMinutes*time.Minute)
 }
 
 // Creates a new Xray exporter with custom log parsing configuration.
@@ -117,23 +110,22 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, logP
 
 	e.conn = conn
 
-	// Initialize GeoIP readers
-	asnDB, err := geoip2.Open(geoip.ASNPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open GeoIP ASN database: %w", err)
+	// Initialize GeoIP readers. GeoIP is optional enrichment, so a missing or
+	// unreadable database is logged and skipped rather than being fatal.
+	if asnDB, err := geoip2.Open(geoip.ASNPath()); err != nil {
+		logrus.WithError(err).Warn("Failed to open GeoIP ASN database, ASN metrics will be unavailable")
+	} else {
+		e.geoipASNReader = asnDB
 	}
-	e.geoipASNReader = asnDB
 
-	cityDB, err := geoip2.Open(geoip.CityPath)
-	if err != nil {
+	if cityDB, err := geoip2.Open(geoip.CityPath()); err != nil {
 		// If city database is missing, we still continue but city/country metrics will be unknown
 		logrus.WithError(err).Warn("Failed to open GeoIP City database, city/country metrics will be unavailable")
 	} else {
 		e.geoipCityReader = cityDB
 	}
 
-	countryDB, err := geoip2.Open(geoip.CountryPath)
-	if err != nil {
+	if countryDB, err := geoip2.Open(geoip.CountryPath()); err != nil {
 		logrus.WithError(err).Warn("Failed to open GeoIP Country database, country metrics will be limited")
 	} else {
 		e.geoipCountryReader = countryDB
@@ -169,6 +161,16 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, logP
 
 // Implements prometheus.Collector interface - gathers all metrics from Xray and log sources.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+	// A panic anywhere in collection runs in a registry-spawned goroutine that
+	// Prometheus does not recover, so it would crash the whole process. Contain
+	// it here and surface the failure as up=0 instead.
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.WithField("panic", r).Error("recovered panic during metrics collection")
+			e.registerConstMetricGauge(ch, "up", 0)
+		}
+	}()
+
 	e.totalScrapes.Inc()
 	start := time.Now()
 
@@ -230,7 +232,7 @@ func (e *Exporter) scrapeXray(ch chan<- prometheus.Metric) error {
 
 // Collects traffic statistics from Xray's stats API.
 func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := e.callWithRetry(func() (interface{}, error) {
+	resp, err := e.callWithRetry(ctx, func() (any, error) {
 		return client.QueryStats(ctx, &command.QueryStatsRequest{Reset_: false})
 	})
 	if err != nil {
@@ -241,6 +243,13 @@ func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.M
 	for _, s := range statsResp.GetStat() {
 		// Parse format: inbound>>>socks-proxy>>>traffic>>>uplink
 		p := strings.Split(s.GetName(), ">>>")
+
+		// Skip names that don't match the expected 4-part format to avoid
+		// index-out-of-range panics on custom/unexpected stat names.
+		if len(p) < 4 {
+			logrus.Debugf("skipping unexpected stat name %q", s.GetName())
+			continue
+		}
 
 		// Skip per-user traffic metrics to control cardinality
 		// This prevents creating thousands of series for individual users
@@ -260,7 +269,7 @@ func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.M
 
 // Collects system runtime metrics from Xray.
 func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := e.callWithRetry(func() (interface{}, error) {
+	resp, err := e.callWithRetry(ctx, func() (any, error) {
 		return client.GetSysStats(ctx, &command.SysStatsRequest{})
 	})
 	if err != nil {
@@ -287,7 +296,7 @@ func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheu
 
 // Implements exponential backoff retry for gRPC calls.
 // Helps handle temporary network issues or Xray restarts.
-func (e *Exporter) callWithRetry(fn func() (any, error)) (any, error) {
+func (e *Exporter) callWithRetry(ctx context.Context, fn func() (any, error)) (any, error) {
 	maxRetries := 3
 	baseDelay := 100 * time.Millisecond
 
@@ -303,7 +312,12 @@ func (e *Exporter) callWithRetry(fn func() (any, error)) (any, error) {
 
 		delay := baseDelay * time.Duration(1<<attempt)
 		logrus.WithError(err).WithField("attempt", attempt+1).WithField("delay", delay).Debug("gRPC call failed, retrying")
-		time.Sleep(delay)
+		// Honour the scrape deadline instead of blocking on a fixed sleep.
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	return nil, fmt.Errorf("max retries exceeded")
@@ -379,12 +393,14 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 		nil,
 	)
 
-	// Only export the top domains and IPs to prevent cardinality leak
+	// Only export the top domains and IPs to prevent cardinality leak.
+	// These are gauges: the backing counts are periodically trimmed to the
+	// top-N, so the value is not monotonic and must not be treated as a counter.
 	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
 	for _, entry := range topN(e.logParser.GetIPCounts(), logparser.MaxTrackedIPs) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
 }
 
@@ -401,9 +417,9 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 		nil,
 	)
 
-	// Only export the top outbounds to prevent cardinality leak
+	// Only export the top outbounds to prevent cardinality leak (gauge, see note above).
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.CounterValue, float64(entry.count), entry.key)
+		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
 }
 
@@ -421,7 +437,7 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		if len(parts) > 1 {
 			org = parts[1]
 		}
-		e.registerConstMetricCounter(ch, "asns_total", float64(entry.count), asn, org)
+		e.registerConstMetricGauge(ch, "asns_total", float64(entry.count), asn, org)
 	}
 }
 
@@ -432,7 +448,7 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 	}
 
 	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
-		e.registerConstMetricCounter(ch, "countries_total", float64(entry.count), entry.key)
+		e.registerConstMetricGauge(ch, "countries_total", float64(entry.count), entry.key)
 	}
 }
 
@@ -450,7 +466,7 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		if len(parts) > 1 {
 			country = parts[1]
 		}
-		e.registerConstMetricCounter(ch, "cities_total", float64(entry.count), city, country)
+		e.registerConstMetricGauge(ch, "cities_total", float64(entry.count), city, country)
 	}
 }
 
