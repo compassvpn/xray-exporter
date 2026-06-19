@@ -316,6 +316,20 @@ This exporter is optimized for high-traffic proxy services:
 - **Concurrent Safe**: Lock-free operations where possible, minimal lock contention
 - **Production Ready**: Handles log rotation, file truncation, and network failures gracefully
 
+## Development
+
+Before committing, run this single command to format, vet, and build the
+project. It mirrors the checks CI runs, so if it passes locally the lint gate
+will pass too:
+
+```bash
+gofmt -w . && go vet ./... && go build ./...
+```
+
+- `gofmt -w .` rewrites any mis-formatted files in place
+- `go vet ./...` catches common mistakes
+- `go build ./...` confirms everything compiles
+
 ## Special Thanks
 
 - <https://github.com/wi1dcard/v2ray-exporter>
