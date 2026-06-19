@@ -7,18 +7,19 @@ import (
 	"bufio"
 	"cmp"
 	"context"
-	"fmt"
 	"maps"
 	"net"
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Cardinality limits to prevent excessive metric series
@@ -44,7 +45,6 @@ type LogEntry struct {
 	Timestamp time.Time
 	IP        string
 	ParsedIP  net.IP
-	Domain    string
 }
 
 // Holds collected metrics for a specified time window.
@@ -58,10 +58,12 @@ type MetricsData struct {
 	CountryCounts  map[string]int64     // country -> total request count (labels: country)
 	CityCounts     map[string]int64     // city -> total request count (labels: city, country)
 
-	// Circular buffer for connection timestamps to limit memory usage
+	// Circular buffer for connection timestamps to limit memory usage.
+	// The backing slice grows lazily up to ConnectionsBufCap so low-traffic
+	// servers don't pay the full allocation upfront.
 	ConnectionTimestamps []time.Time // circular buffer of connection timestamps
 	ConnectionsBufHead   int         // current write position in buffer
-	ConnectionsBufSize   int         // actual size of valid data in buffer
+	ConnectionsBufSize   int         // number of in-window entries currently held
 	ConnectionsBufCap    int         // maximum buffer capacity
 
 	LastPos   int64  // last position read in log file
@@ -103,6 +105,32 @@ var (
 	outboundRegex    = regexp.MustCompile(`\[[^\]]*?(?:->|>>)\s*([^\]]+?)\]`)
 )
 
+// metricsDelta accumulates a batch of parsed results so the expensive parsing
+// and GeoIP lookups can run WITHOUT holding the metrics lock. The deltas are
+// merged into the shared MetricsData under a brief lock at the end of a batch.
+type metricsDelta struct {
+	domainCounts   map[string]int64
+	ipCounts       map[string]int64
+	outboundCounts map[string]int64
+	asnCounts      map[string]int64
+	countryCounts  map[string]int64
+	cityCounts     map[string]int64
+	uniqueIPs      map[string]time.Time
+	timestamps     []time.Time
+}
+
+func newMetricsDelta() *metricsDelta {
+	return &metricsDelta{
+		domainCounts:   make(map[string]int64),
+		ipCounts:       make(map[string]int64),
+		outboundCounts: make(map[string]int64),
+		asnCounts:      make(map[string]int64),
+		countryCounts:  make(map[string]int64),
+		cityCounts:     make(map[string]int64),
+		uniqueIPs:      make(map[string]time.Time),
+	}
+}
+
 // Performs quick checks to skip obviously invalid lines before expensive parsing.
 // Improves performance by filtering out non-log lines early.
 func shouldSkipLine(line string) bool {
@@ -129,14 +157,19 @@ func shouldSkipLine(line string) bool {
 	return false
 }
 
-// Extracts the root domain from a full domain name.
-// Example: sub.google.com -> google.com
+// Extracts the registrable (eTLD+1) domain from a full domain name, using the
+// public suffix list so multi-part suffixes are handled correctly.
+// Example: a.sub.example.co.uk -> example.co.uk
 func getRootDomain(domain string) string {
 	if domain == "" {
 		return ""
 	}
 
-	// Handle domain names - extract root domain
+	if etld1, err := publicsuffix.EffectiveTLDPlusOne(domain); err == nil && etld1 != "" {
+		return etld1
+	}
+
+	// Fallback: last two labels.
 	parts := strings.Split(domain, ".")
 	if len(parts) >= 2 {
 		return parts[len(parts)-2] + "." + parts[len(parts)-1]
@@ -155,12 +188,18 @@ func extractOutbound(line string) string {
 }
 
 // Adds a timestamp to the circular buffer.
-// Prevents memory growth by overwriting old entries when the buffer is full.
+// The backing slice grows lazily up to the cap, then overwrites the oldest entry.
 func (p *Parser) addConnectionTimestamp(ts time.Time) {
-	p.metrics.ConnectionTimestamps[p.metrics.ConnectionsBufHead] = ts
-	p.metrics.ConnectionsBufHead = (p.metrics.ConnectionsBufHead + 1) % p.metrics.ConnectionsBufCap
-	if p.metrics.ConnectionsBufSize < p.metrics.ConnectionsBufCap {
-		p.metrics.ConnectionsBufSize++
+	m := p.metrics
+	if m.ConnectionsBufHead == len(m.ConnectionTimestamps) && len(m.ConnectionTimestamps) < m.ConnectionsBufCap {
+		// Still growing the backing array.
+		m.ConnectionTimestamps = append(m.ConnectionTimestamps, ts)
+	} else {
+		m.ConnectionTimestamps[m.ConnectionsBufHead] = ts
+	}
+	m.ConnectionsBufHead = (m.ConnectionsBufHead + 1) % m.ConnectionsBufCap
+	if m.ConnectionsBufSize < m.ConnectionsBufCap {
+		m.ConnectionsBufSize++
 	}
 }
 
@@ -230,21 +269,25 @@ func keepTopN(counts map[string]int64, n int) map[string]int64 {
 func NewParser(config Config) (*Parser, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Calculate buffer capacity automatically based on time window
-	// Use adaptive sizing: more time = bigger buffer, with sensible bounds
+	// Calculate buffer capacity automatically based on time window.
+	// The buffer is a cap, not an upfront allocation: it grows lazily with
+	// actual traffic (see addConnectionTimestamp).
 	minutes := int(config.TimeWindow.Minutes())
 
 	var bufferCap int
 	switch {
 	case minutes <= 5:
-		bufferCap = 500000 // Short windows: 500K entries (~12MB)
+		bufferCap = 500000 // Short windows: up to 500K entries (~12MB)
 	case minutes <= 10:
-		bufferCap = 1000000 // Medium windows: 1M entries (~24MB)
+		bufferCap = 1000000 // Medium windows: up to 1M entries (~24MB)
 	case minutes <= 30:
-		bufferCap = 2000000 // Long windows: 2M entries (~48MB)
+		bufferCap = 2000000 // Long windows: up to 2M entries (~48MB)
 	default:
-		bufferCap = 5000000 // Very long windows: 5M entries (~120MB)
+		bufferCap = 5000000 // Very long windows: up to 5M entries (~120MB)
 	}
+
+	// Start small and let the buffer grow with traffic.
+	initialCap := min(bufferCap, 1024)
 
 	parser := &Parser{
 		logPath:       config.LogPath,
@@ -261,7 +304,7 @@ func NewParser(config Config) (*Parser, error) {
 			ASNCounts:            make(map[string]int64),
 			CountryCounts:        make(map[string]int64),
 			CityCounts:           make(map[string]int64),
-			ConnectionTimestamps: make([]time.Time, bufferCap),
+			ConnectionTimestamps: make([]time.Time, 0, initialCap),
 			ConnectionsBufHead:   0,
 			ConnectionsBufSize:   0,
 			ConnectionsBufCap:    bufferCap,
@@ -269,9 +312,6 @@ func NewParser(config Config) (*Parser, error) {
 		ctx:    ctx,
 		cancel: cancel,
 	}
-
-	// Immediate cleanup on startup to ensure clean state
-	parser.trimToTopN()
 
 	return parser, nil
 }
@@ -311,23 +351,22 @@ func (p *Parser) GetMetrics() (int, int64) {
 		delete(p.metrics.UniqueIPs, ip)
 	}
 
-	// Count valid connections in circular buffer
-	var validConnections int64
-	for i := 0; i < p.metrics.ConnectionsBufSize; i++ {
-		idx := (p.metrics.ConnectionsBufHead - i - 1 + p.metrics.ConnectionsBufCap) % p.metrics.ConnectionsBufCap
-		if p.metrics.ConnectionTimestamps[idx].After(cutoff) {
-			validConnections++
-		} else {
-			// Since we store in chronological order, older entries won't be valid either
+	// Expire connection timestamps from the oldest end. Because entries are
+	// stored chronologically, we only walk the newly-expired tail, and the
+	// remaining size IS the in-window connection count (amortized O(1)).
+	bufCap := p.metrics.ConnectionsBufCap
+	for p.metrics.ConnectionsBufSize > 0 {
+		tail := ((p.metrics.ConnectionsBufHead-p.metrics.ConnectionsBufSize)%bufCap + bufCap) % bufCap
+		if p.metrics.ConnectionTimestamps[tail].After(cutoff) {
 			break
 		}
+		p.metrics.ConnectionsBufSize--
 	}
 
-	return activeIPs, validConnections
+	return activeIPs, int64(p.metrics.ConnectionsBufSize)
 }
 
 // Returns a copy of current domain request counts.
-// These are cumulative counters since parser startup.
 func (p *Parser) GetDomainCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
@@ -344,7 +383,6 @@ func (p *Parser) GetIPCounts() map[string]int64 {
 }
 
 // Returns a copy of current outbound request counts.
-// These are cumulative counters since parser startup.
 func (p *Parser) GetOutboundCounts() map[string]int64 {
 	p.metrics.mu.RLock()
 	defer p.metrics.mu.RUnlock()
@@ -416,153 +454,179 @@ func (p *Parser) parseLogFile() error {
 	}
 
 	p.mu.Lock()
-	currentInode := getInode(stat)
+	currentInode := getInode(file, stat)
 
-	// Check for log rotation by comparing inodes
-	if currentInode != p.metrics.LastInode {
+	switch {
+	case p.metrics.LastInode == 0:
+		// First run: adopt the current file identity, keep position (0).
+		p.metrics.LastInode = currentInode
+	case currentInode != p.metrics.LastInode:
 		logrus.Debug("Log file rotated, resetting position")
 		p.metrics.LastPos = 0
 		p.metrics.LastInode = currentInode
-	}
-
-	// Handle file truncation (file got smaller)
-	if p.metrics.LastPos > stat.Size() {
+	case p.metrics.LastPos > stat.Size():
 		logrus.Debug("Log file truncated, resetting position")
 		p.metrics.LastPos = 0
 	}
 
-	// Initialize tracking on first run
-	if p.metrics.LastInode == 0 {
-		p.metrics.LastPos = 0
-		p.metrics.LastInode = currentInode
-	}
-
-	// Seek to last known position
-	if _, err := file.Seek(p.metrics.LastPos, 0); err != nil {
-		p.mu.Unlock()
-		return err
-	}
+	startPos := p.metrics.LastPos
 	p.mu.Unlock()
 
-	scanner := bufio.NewScanner(file)
-	cutoff := time.Now().Add(-p.timeWindow)
-	newPos := p.metrics.LastPos
-
-	p.metrics.mu.Lock()
-	defer p.metrics.mu.Unlock()
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		newPos += int64(len(line)) + 1 // +1 for newline
-
-		// Quick pre-filtering to skip obviously invalid lines
-		if shouldSkipLine(line) {
-			continue
-		}
-
-		entry, err := p.parseLine(line)
-		if err != nil || entry == nil {
-			continue
-		}
-
-		// Always track domain and IP requests (cumulative counters)
-		originalDomain := extractDomainOptimized(line)
-		if originalDomain != "" {
-			if isIPAddressFast(originalDomain) {
-				// Normalize and exclude system/DNS/private IPs
-				normalized := normalizeIP(originalDomain)
-				if normalized != "" && !p.ipFilter.ShouldFilter(normalized) {
-					p.metrics.IPCounts[normalized]++
-				}
-			} else {
-				// Track domain requests (root domain)
-				rootDomain := getRootDomain(originalDomain)
-				if rootDomain != "" {
-					p.metrics.DomainCounts[rootDomain]++
-				}
-			}
-		}
-
-		// Always track outbound requests (cumulative counters)
-		outbound := extractOutbound(line)
-		if outbound != "" {
-			p.metrics.OutboundCounts[outbound]++
-		}
-
-		// Skip entries outside time window (for user metrics only)
-		if entry.Timestamp.Before(cutoff) {
-			continue
-		}
-
-		// Filter out internal/system IPs
-		if p.ipFilter.ShouldFilter(entry.IP) {
-			continue
-		}
-
-		// Update user metrics (time-windowed)
-		p.addConnectionTimestamp(entry.Timestamp)
-		// Track unique IPs with last seen time
-		p.metrics.UniqueIPs[entry.IP] = entry.Timestamp
-
-		// Extract context for detailed tracking
-		countryCode := "unknown"
-		cityName := "unknown"
-		asn := "unknown"
-		org := "unknown"
-
-		// Detailed GeoIP lookups
-		if p.cityReader != nil {
-			if record, err := p.cityReader.City(entry.ParsedIP); err == nil {
-				if record.Country.IsoCode != "" {
-					countryCode = record.Country.IsoCode
-				}
-				if name, ok := record.City.Names["en"]; ok && name != "" {
-					cityName = name
-				}
-			}
-		} else if p.countryReader != nil {
-			if record, err := p.countryReader.Country(entry.ParsedIP); err == nil {
-				if record.Country.IsoCode != "" {
-					countryCode = record.Country.IsoCode
-				}
-			}
-		}
-
-		if p.asnReader != nil {
-			if record, err := p.asnReader.ASN(entry.ParsedIP); err == nil {
-				asn = fmt.Sprintf("%d", record.AutonomousSystemNumber)
-				org = record.AutonomousSystemOrganization
-			}
-		}
-
-		// Update aggregated metrics
-		if countryCode != "unknown" {
-			p.metrics.CountryCounts[countryCode]++
-		}
-		if cityName != "unknown" {
-			cityKey := fmt.Sprintf("%s|%s", cityName, countryCode)
-			p.metrics.CityCounts[cityKey]++
-		}
-
-		// Update Detailed ASN tracking (consolidated metric)
-		// Key format: asn|org
-		asnKey := fmt.Sprintf("%s|%s", asn, org)
-		p.metrics.ASNCounts[asnKey]++
+	// Seek to last known position
+	if _, err := file.Seek(startPos, 0); err != nil {
+		return err
 	}
 
-	// Update file position for next read
+	cutoff := time.Now().Add(-p.timeWindow)
+	newPos := startPos
+	delta := newMetricsDelta()
+
+	// bufio.Reader (not Scanner) avoids the 64KB line cap and lets us track the
+	// exact number of bytes consumed (including \r and \n), so the position never
+	// drifts on CRLF logs.
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// io.EOF (or any read error): a trailing line without a newline is a
+			// partial write; stop without consuming it so it is re-read once
+			// complete on the next pass.
+			break
+		}
+		newPos += int64(len(line))
+		p.processLine(strings.TrimRight(line, "\r\n"), cutoff, delta)
+	}
+
+	// Merge the batch under the metrics lock. No parsing or I/O happens here,
+	// so scrapes are only blocked for the duration of a few map merges.
+	p.metrics.mu.Lock()
+	p.mergeDelta(delta)
+	p.metrics.mu.Unlock()
+
+	// Update file position for next read.
 	p.mu.Lock()
 	p.metrics.LastPos = newPos
 	p.mu.Unlock()
 
-	return scanner.Err()
+	return nil
 }
 
-// Parses a single log line with optimized string operations.
-// Extracts timestamp, IP address, domain, and blocked status.
-func (p *Parser) parseLine(line string) (*LogEntry, error) {
-	entry := &LogEntry{}
+// processLine parses a single log line and records its data into delta.
+// It performs no shared-state mutation (the IP filter and GeoIP readers are
+// safe for concurrent use), so it can run without holding the metrics lock.
+func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta) {
+	// Quick pre-filtering to skip obviously invalid lines
+	if shouldSkipLine(line) {
+		return
+	}
 
+	entry, err := p.parseLine(line)
+	if err != nil || entry == nil {
+		return
+	}
+
+	// Always track domain and IP requests.
+	if domain := extractDomainOptimized(line); domain != "" {
+		if isIPAddressFast(domain) {
+			// Normalize and exclude system/DNS/private IPs.
+			if normalized := normalizeIP(domain); normalized != "" && !p.ipFilter.ShouldFilter(normalized) {
+				delta.ipCounts[normalized]++
+			}
+		} else if rootDomain := getRootDomain(domain); rootDomain != "" {
+			delta.domainCounts[rootDomain]++
+		}
+	}
+
+	// Always track outbound requests.
+	if outbound := extractOutbound(line); outbound != "" {
+		delta.outboundCounts[outbound]++
+	}
+
+	// Skip entries outside time window (for user metrics only).
+	if entry.Timestamp.Before(cutoff) {
+		return
+	}
+
+	// Filter out internal/system IPs.
+	if p.ipFilter.ShouldFilter(entry.IP) {
+		return
+	}
+
+	// Update user metrics (time-windowed).
+	delta.timestamps = append(delta.timestamps, entry.Timestamp)
+	delta.uniqueIPs[entry.IP] = entry.Timestamp
+
+	// Extract context for detailed tracking.
+	countryCode := "unknown"
+	cityName := "unknown"
+	asn := "unknown"
+	org := "unknown"
+
+	if p.cityReader != nil {
+		if record, err := p.cityReader.City(entry.ParsedIP); err == nil {
+			if record.Country.IsoCode != "" {
+				countryCode = record.Country.IsoCode
+			}
+			if name, ok := record.City.Names["en"]; ok && name != "" {
+				cityName = name
+			}
+		}
+	} else if p.countryReader != nil {
+		if record, err := p.countryReader.Country(entry.ParsedIP); err == nil {
+			if record.Country.IsoCode != "" {
+				countryCode = record.Country.IsoCode
+			}
+		}
+	}
+
+	if p.asnReader != nil {
+		if record, err := p.asnReader.ASN(entry.ParsedIP); err == nil {
+			asn = strconv.FormatUint(uint64(record.AutonomousSystemNumber), 10)
+			org = record.AutonomousSystemOrganization
+		}
+	}
+
+	// Update aggregated metrics.
+	if countryCode != "unknown" {
+		delta.countryCounts[countryCode]++
+	}
+	if cityName != "unknown" {
+		delta.cityCounts[cityName+"|"+countryCode]++
+	}
+	// Key format: asn|org
+	delta.asnCounts[asn+"|"+org]++
+}
+
+// mergeDelta folds a parsed batch into the shared metrics. Caller must hold metrics.mu.
+func (p *Parser) mergeDelta(d *metricsDelta) {
+	for k, v := range d.domainCounts {
+		p.metrics.DomainCounts[k] += v
+	}
+	for k, v := range d.ipCounts {
+		p.metrics.IPCounts[k] += v
+	}
+	for k, v := range d.outboundCounts {
+		p.metrics.OutboundCounts[k] += v
+	}
+	for k, v := range d.asnCounts {
+		p.metrics.ASNCounts[k] += v
+	}
+	for k, v := range d.countryCounts {
+		p.metrics.CountryCounts[k] += v
+	}
+	for k, v := range d.cityCounts {
+		p.metrics.CityCounts[k] += v
+	}
+	for ip, ts := range d.uniqueIPs {
+		p.metrics.UniqueIPs[ip] = ts
+	}
+	for _, ts := range d.timestamps {
+		p.addConnectionTimestamp(ts)
+	}
+}
+
+// Parses a single log line, extracting timestamp and client IP.
+func (p *Parser) parseLine(line string) (*LogEntry, error) {
 	// Parse timestamp
 	timestampMatch := timestampRegex.FindStringSubmatch(line)
 	if len(timestampMatch) < 2 {
@@ -573,7 +637,6 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entry.Timestamp = timestamp
 
 	// Extract IP with single pass through formats
 	var ip string
@@ -591,28 +654,17 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 		return nil, nil // Skip lines without IP
 	}
 
-	// Normalize IP once and reuse result
-	normalizedIP := normalizeIP(ip)
-	if normalizedIP == "" {
+	// Normalize and parse the IP once, reusing the parsed value.
+	normalizedIP, parsedIP := normalizeIPParsed(ip)
+	if parsedIP == nil {
 		return nil, nil // Skip invalid IPs
 	}
-	entry.IP = normalizedIP
-	entry.ParsedIP = net.ParseIP(normalizedIP)
 
-	// Extract domain for entry (just for reference, actual tracking done later)
-	// Use optimized domain extraction that reuses already parsed line components
-	domain := extractDomainOptimized(line)
-	if domain != "" {
-		// Check if it's an IP by testing if it's the same as our normalized IP
-		// This avoids calling net.ParseIP again
-		if domain == normalizedIP || isIPAddressFast(domain) {
-			entry.Domain = domain // Keep IP as-is
-		} else {
-			entry.Domain = getRootDomain(domain) // Store root domain
-		}
-	}
-
-	return entry, nil
+	return &LogEntry{
+		Timestamp: timestamp,
+		IP:        normalizedIP,
+		ParsedIP:  parsedIP,
+	}, nil
 }
 
 // Performs a quick heuristic check for IP addresses without full parsing.
@@ -666,32 +718,20 @@ func extractDomainOptimized(line string) string {
 	return domainPort[:colonIdx]
 }
 
-// Normalizes an IP address string.
-func normalizeIP(ip string) string {
+// normalizeIPParsed canonicalizes an IP address string and returns both the
+// canonical string form and the parsed net.IP, so callers don't parse twice.
+func normalizeIPParsed(ip string) (string, net.IP) {
 	ip = strings.Trim(ip, "[]")
 
 	if parsed := net.ParseIP(ip); parsed != nil {
-		return parsed.String()
+		return parsed.String(), parsed
 	}
 
-	return ""
+	return "", nil
 }
 
-// getSubnet24 masks an IP address to its /24 prefix (IPv4) or /48 prefix (IPv6).
-func getSubnet24(ip net.IP) string {
-	if ip == nil {
-		return ""
-	}
-
-	if ipv4 := ip.To4(); ipv4 != nil {
-		// IPv4: mask to /24 (first 3 bytes)
-		return fmt.Sprintf("%d.%d.%d.0/24", ipv4[0], ipv4[1], ipv4[2])
-	}
-
-	// IPv6: mask to /48 (first 6 bytes) as a sensible equivalent for aggregation
-	if len(ip) >= 6 {
-		return fmt.Sprintf("%02x%02x:%02x%02x:%02x%02x::/48",
-			ip[0], ip[1], ip[2], ip[3], ip[4], ip[5])
-	}
-	return ""
+// Normalizes an IP address string, returning "" if it is not a valid IP.
+func normalizeIP(ip string) string {
+	s, _ := normalizeIPParsed(ip)
+	return s
 }

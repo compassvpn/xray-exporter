@@ -3,27 +3,29 @@
 package logparser
 
 import (
+	"container/list"
 	"net"
 	"sync"
 )
 
 // Efficiently filters out unwanted IP addresses from metrics collection.
 // Uses multiple strategies: exact matches for system IPs, network ranges for private IPs,
-// and an LRU cache to avoid repeated expensive lookups.
+// and an LRU cache (O(1) eviction) to avoid repeated expensive lookups.
 type IPFilter struct {
-	systemIPs    map[string]bool       // Known system/localhost addresses
-	dnsServers   map[string]bool       // Common public DNS servers
-	privateNets  []*net.IPNet          // Private network ranges (RFC 1918, etc.)
-	cache        map[string]cacheEntry // LRU cache for filter results
-	cacheMu      sync.RWMutex          // Protects cache access
-	maxCacheSize int                   // Maximum cache entries before eviction
-	cacheCounter uint64                // Counter for LRU tracking
+	systemIPs   map[string]bool // Known system/localhost addresses
+	dnsServers  map[string]bool // Common public DNS servers
+	privateNets []*net.IPNet    // Private network ranges (RFC 1918, etc.)
+
+	mu           sync.Mutex               // Protects the LRU cache
+	cache        map[string]*list.Element // ip -> element in lru
+	lru          *list.List               // most-recently-used at the front
+	maxCacheSize int                      // Maximum cache entries before eviction
 }
 
-// Stores a filter result with LRU tracking information.
-type cacheEntry struct {
-	result   bool   // Whether this IP should be filtered
-	lastUsed uint64 // LRU counter value when last accessed
+// Stores a cached filter result for one IP.
+type cacheItem struct {
+	ip     string
+	result bool
 }
 
 // Creates a new IP filter with predefined lists of addresses to exclude.
@@ -32,9 +34,9 @@ func NewIPFilter() *IPFilter {
 	filter := &IPFilter{
 		systemIPs:    make(map[string]bool),
 		dnsServers:   make(map[string]bool),
-		cache:        make(map[string]cacheEntry),
+		cache:        make(map[string]*list.Element),
+		lru:          list.New(),
 		maxCacheSize: 100000,
-		cacheCounter: 0,
 	}
 
 	// System and localhost addresses
@@ -94,51 +96,37 @@ func NewIPFilter() *IPFilter {
 }
 
 // Returns true if the IP address should be excluded from user metrics.
-// Uses an LRU cache to avoid repeated expensive network checks for the same IPs.
+// Uses an LRU cache (O(1) lookup and eviction) to avoid repeated network checks.
 func (f *IPFilter) ShouldFilter(ip string) bool {
-	// Check cache first for fast path
-	f.cacheMu.RLock()
-	if entry, exists := f.cache[ip]; exists {
-		f.cacheMu.RUnlock()
-
-		// Update access time atomically for LRU tracking
-		f.cacheMu.Lock()
-		f.cacheCounter++
-		entry.lastUsed = f.cacheCounter
-		f.cache[ip] = entry
-		f.cacheMu.Unlock()
-
-		return entry.result
+	f.mu.Lock()
+	if el, ok := f.cache[ip]; ok {
+		f.lru.MoveToFront(el)
+		result := el.Value.(*cacheItem).result
+		f.mu.Unlock()
+		return result
 	}
-	f.cacheMu.RUnlock()
+	f.mu.Unlock()
 
-	// Perform actual filtering logic
+	// Perform actual filtering logic (no lock needed; reads immutable data).
 	result := f.shouldFilterInternal(ip)
 
-	// Update cache with result
-	f.cacheMu.Lock()
-	defer f.cacheMu.Unlock()
-
-	// Implement LRU eviction when cache is full
-	if len(f.cache) >= f.maxCacheSize {
-		// Find and remove the least recently used entry
-		var oldestIP string
-		var oldestTime uint64 = ^uint64(0) // Max uint64
-
-		for cachedIP, entry := range f.cache {
-			if entry.lastUsed < oldestTime {
-				oldestTime = entry.lastUsed
-				oldestIP = cachedIP
+	f.mu.Lock()
+	if el, ok := f.cache[ip]; ok {
+		// Inserted by a concurrent caller in the meantime; just refresh it.
+		f.lru.MoveToFront(el)
+		el.Value.(*cacheItem).result = result
+	} else {
+		f.cache[ip] = f.lru.PushFront(&cacheItem{ip: ip, result: result})
+		// Evict the least-recently-used entry in O(1) when over capacity.
+		if f.lru.Len() > f.maxCacheSize {
+			if oldest := f.lru.Back(); oldest != nil {
+				f.lru.Remove(oldest)
+				delete(f.cache, oldest.Value.(*cacheItem).ip)
 			}
 		}
-
-		if oldestIP != "" {
-			delete(f.cache, oldestIP)
-		}
 	}
+	f.mu.Unlock()
 
-	f.cacheCounter++
-	f.cache[ip] = cacheEntry{result: result, lastUsed: f.cacheCounter}
 	return result
 }
 

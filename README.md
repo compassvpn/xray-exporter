@@ -11,7 +11,7 @@ An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and expo
 - **GeoIP Intelligence**: Automated Top ASNs, Countries, and Cities tracking with auto-downloading databases
 - **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
 - **High Performance**: Optimized log parsing with circular buffers and LRU caching
-- **Auto-scaling**: Adaptive memory usage based on traffic patterns
+- **Adaptive buffers**: Connection buffer sized by the time window and grown lazily as traffic arrives
 - **Cross-platform**: Supports Linux, macOS, Windows with proper log rotation detection
 
 ## Quick Start
@@ -59,6 +59,7 @@ Application Options:
   -p, --log-path=PATH              Path to Xray access log file (empty to disable user metrics) 
                                    (default: /var/log/xray/access.log)
   -w, --log-time-window=N          Time window in minutes for user metrics (default: 5)
+  -g, --geoip-dir=PATH             Directory for GeoLite2 databases (default: .)
       --version                    Display the version and exit
       --log-level=LEVEL            Log level: error, warn, info, debug
                                    (env: LOG_LEVEL) (default: warn)
@@ -299,9 +300,11 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 
 Use these queries to visualize the new GeoIP metrics:
 
-- **Top 10 ASNs**: `topk(10, sum by (asn, org) (increase(xray_asns_total[$__range])))`
-- **Top 10 Countries**: `topk(10, sum by (country) (increase(xray_countries_total[$__range])))`
-- **Top 10 Cities**: `topk(10, sum by (city, country) (increase(xray_cities_total[$__range])))`
+These series are gauges (top-N request counts since the parser started, periodically trimmed), so query the value directly rather than with `rate()`/`increase()`:
+
+- **Top 10 ASNs**: `topk(10, sum by (asn, org) (xray_asns_total))`
+- **Top 10 Countries**: `topk(10, sum by (country) (xray_countries_total))`
+- **Top 10 Cities**: `topk(10, sum by (city, country) (xray_cities_total))`
 
 ## Performance & Scalability
 

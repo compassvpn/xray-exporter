@@ -1,4 +1,4 @@
-FROM alpine:latest
+FROM alpine:3.24
 RUN apk --no-cache add ca-certificates
 ARG TARGETARCH
 EXPOSE 9550
