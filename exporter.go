@@ -31,6 +31,7 @@ const DefaultLogTimeWindowMinutes = 5
 type Exporter struct {
 	endpoint           string
 	scrapeTimeout      time.Duration
+	userTrafficMetrics bool
 	registry           *prometheus.Registry
 	totalScrapes       prometheus.Counter
 	metricDescriptions map[string]*prometheus.Desc
@@ -49,13 +50,14 @@ type Exporter struct {
 
 // Creates a new Xray exporter with custom log parsing configuration.
 // Pass empty logPath to disable user metrics from log parsing.
-func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, logPath string, logTimeWindow time.Duration) (*Exporter, error) {
+func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, userTrafficMetrics bool, logPath string, logTimeWindow time.Duration) (*Exporter, error) {
 	e := Exporter{
-		endpoint:      endpoint,
-		scrapeTimeout: scrapeTimeout,
-		registry:      prometheus.NewRegistry(),
-		logPath:       logPath,
-		logTimeWindow: logTimeWindow,
+		endpoint:           endpoint,
+		scrapeTimeout:      scrapeTimeout,
+		userTrafficMetrics: userTrafficMetrics,
+		registry:           prometheus.NewRegistry(),
+		logPath:            logPath,
+		logTimeWindow:      logTimeWindow,
 
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "xray",
@@ -251,9 +253,10 @@ func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.M
 			continue
 		}
 
-		// Skip per-user traffic metrics to control cardinality
-		// This prevents creating thousands of series for individual users
-		if p[0] == "user" {
+		// Skip per-user traffic metrics unless explicitly enabled. Per-user
+		// series are unbounded (one per user, with no top-N cap), so they stay
+		// off by default to control cardinality.
+		if p[0] == "user" && !e.userTrafficMetrics {
 			continue
 		}
 

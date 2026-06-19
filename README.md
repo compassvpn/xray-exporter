@@ -56,6 +56,8 @@ Application Options:
   -m, --metrics-path=PATH          Metrics path (default: /scrape)
   -e, --xray-endpoint=HOST:PORT    Xray API endpoint (default: 127.0.0.1:8080)
   -t, --scrape-timeout=N           The timeout in seconds for every individual scrape (default: 3)
+  -u, --user-traffic-metrics       Export per-user traffic byte counters
+                                   (high cardinality: one series per user)
   -p, --log-path=PATH              Path to Xray access log file (empty to disable user metrics) 
                                    (default: /var/log/xray/access.log)
   -w, --log-time-window=N          Time window in minutes for user metrics (default: 5)
@@ -275,6 +277,8 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 | `outbound>>>tag-name>>>traffic>>>downlink` | `xray_traffic_downlink_bytes_total{dimension="outbound",target="tag-name"}` |
 | `user>>>user-email>>>traffic>>>uplink`     | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`    |
 | `user>>>user-email>>>traffic>>>downlink`  | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`  |
+
+> **Per-user traffic is opt-in.** The `dimension="user"` rows above are **not exported by default** — pass `--user-traffic-metrics` (`-u`) to enable them. Each user becomes its own series with no top-N cap, so only enable this on instances with a bounded, known set of users.
 
 ### User Activity Metrics (Log Parsing)
 
