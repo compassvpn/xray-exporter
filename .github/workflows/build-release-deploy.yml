@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -60,7 +62,9 @@ jobs:
             goarch: arm64
     steps:
     - uses: actions/checkout@v7
-    
+      with:
+        persist-credentials: false
+
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
@@ -95,6 +99,7 @@ jobs:
         name: xray-exporter-${{ matrix.goos }}-${{ matrix.goarch }}
         path: dist/
         retention-days: 7
+        if-no-files-found: error
 
   docker:
     if: github.event_name != 'pull_request'
@@ -105,7 +110,9 @@ jobs:
       packages: write
     steps:
     - uses: actions/checkout@v7
-    
+      with:
+        persist-credentials: false
+
     - name: Download all artifacts
       uses: actions/download-artifact@v7
       with:
@@ -122,16 +129,29 @@ jobs:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-        
+
+    - name: Extract image metadata
+      id: meta
+      uses: docker/metadata-action@v6
+      env:
+        DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=tag
+          type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
     - name: Build and push multi-arch image
       uses: docker/build-push-action@v7
       with:
         context: .
         platforms: linux/amd64,linux/arm64,linux/arm/v7
         push: true
-        tags: |
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-          ${{ startsWith(github.ref, 'refs/tags/') && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        provenance: mode=max
+        sbom: true
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
