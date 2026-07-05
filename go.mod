@@ -7,12 +7,12 @@ toolchain go1.26.4
 require (
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/prometheus/client_golang v1.22.0
-	github.com/sirupsen/logrus v1.9.3
-	github.com/xtls/xray-core v1.250608.0
-	golang.org/x/net v0.55.0
-	golang.org/x/sys v0.45.0
-	google.golang.org/grpc v1.79.3
+	github.com/prometheus/client_golang v1.23.2
+	github.com/sirupsen/logrus v1.9.4
+	github.com/xtls/xray-core v1.260327.0
+	golang.org/x/net v0.56.0
+	golang.org/x/sys v0.46.0
+	google.golang.org/grpc v1.82.0
 )
 
 require (
@@ -20,12 +20,13 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oschwald/maxminddb-golang v1.13.0 // indirect
-	github.com/pires/go-proxyproto v0.8.1 // indirect
-	github.com/prometheus/client_model v0.6.1 // indirect
-	github.com/prometheus/common v0.62.0 // indirect
-	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/pires/go-proxyproto v0.11.0 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/common v0.66.1 // indirect
+	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/sagernet/sing v0.5.1 // indirect
-	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/text v0.38.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
