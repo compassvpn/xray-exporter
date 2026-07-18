@@ -286,11 +286,13 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 | :----- | :---------- | :----- |
 | `xray_unique_users` | Number of unique users active in the time window | - |
 | `xray_total_connections` | Total number of connections in the time window | - |
-| `xray_requested_domain_ip_total` | Total requests per domain or IP address | `target` |
-| `xray_outbound_requests_total` | Total requests per outbound connection | `outbound` |
-| `xray_asns_total` | Total requests per ASN | `asn`, `org` |
-| `xray_countries_total` | Total requests per country | `country` |
-| `xray_cities_total` | Total requests per city | `city`, `country` |
+| `xray_requested_domain_ip` | Requests per domain or IP address (top-N in time window) | `target` |
+| `xray_outbound_requests` | Requests per outbound connection (top-N in time window) | `outbound` |
+| `xray_asns` | Requests per ASN (top-N in time window) | `asn`, `org` |
+| `xray_countries` | Requests per country (top-N in time window) | `country` |
+| `xray_cities` | Requests per city (top-N in time window) | `city`, `country` |
+
+> These are gauges, not counters. They hold current top-N request counts in the time window and are trimmed each scrape, so the value is not monotonic. Do not apply `rate()`/`increase()`.
 
 ### Core Metrics
 
@@ -306,9 +308,9 @@ Use these queries to visualize the new GeoIP metrics:
 
 These series are gauges (top-N request counts since the parser started, periodically trimmed), so query the value directly rather than with `rate()`/`increase()`:
 
-- **Top 10 ASNs**: `topk(10, sum by (asn, org) (xray_asns_total))`
-- **Top 10 Countries**: `topk(10, sum by (country) (xray_countries_total))`
-- **Top 10 Cities**: `topk(10, sum by (city, country) (xray_cities_total))`
+- **Top 10 ASNs**: `topk(10, sum by (asn, org) (xray_asns))`
+- **Top 10 Countries**: `topk(10, sum by (country) (xray_countries))`
+- **Top 10 Cities**: `topk(10, sum by (city, country) (xray_cities))`
 
 ## Performance & Scalability
 
