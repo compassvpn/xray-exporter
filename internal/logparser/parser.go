@@ -633,7 +633,9 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 		return nil, nil // Skip lines without timestamp
 	}
 
-	timestamp, err := time.Parse("2006/01/02 15:04:05", timestampMatch[1])
+	// Xray writes local time, so parse in the local zone. Parsing as UTC would
+	// shift every timestamp by the UTC offset and break the time-window filter.
+	timestamp, err := time.ParseInLocation("2006/01/02 15:04:05", timestampMatch[1], time.Local)
 	if err != nil {
 		return nil, err
 	}
