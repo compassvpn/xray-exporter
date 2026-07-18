@@ -80,19 +80,39 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		"traffic_uplink_bytes_total":   {txt: "Number of transmitted bytes", lbls: []string{"dimension", "target"}},
 		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
 
-		// User activity metrics from log parsing
+		// Xray runtime metrics from GetSysStats
+		"goroutines":                 {txt: "Number of goroutines running in the Xray process"},
+		"memstats_alloc_bytes":       {txt: "Bytes of allocated heap objects"},
+		"memstats_alloc_bytes_total": {txt: "Cumulative bytes allocated for heap objects"},
+		"memstats_sys_bytes":         {txt: "Total bytes of memory obtained from the OS"},
+		"memstats_mallocs_total":     {txt: "Cumulative count of heap objects allocated"},
+		"memstats_frees_total":       {txt: "Cumulative count of heap objects freed"},
+		"memstats_num_gc":            {txt: "Number of completed GC cycles"},
+		"memstats_pause_total_ns":    {txt: "Cumulative nanoseconds in GC stop-the-world pauses"},
+
+		// User activity metrics from log parsing.
+		// The per-target counts below are gauges: they are trimmed to top-N each
+		// scrape, so the value is not monotonic and must not carry a _total suffix.
 		"unique_users":      {txt: "Number of unique users in time window"},
 		"total_connections": {txt: "Total number of connections in time window"},
-		"asns_total": {
-			txt:  "Total number of requests per ASN",
+		"requested_domain_ip": {
+			txt:  "Number of requests per domain or IP (top-N in time window)",
+			lbls: []string{"target"},
+		},
+		"outbound_requests": {
+			txt:  "Number of requests per outbound (top-N in time window)",
+			lbls: []string{"outbound"},
+		},
+		"asns": {
+			txt:  "Number of requests per ASN (top-N in time window)",
 			lbls: []string{"asn", "org"},
 		},
-		"countries_total": {
-			txt:  "Total number of requests per country",
+		"countries": {
+			txt:  "Number of requests per country (top-N in time window)",
 			lbls: []string{"country"},
 		},
-		"cities_total": {
-			txt:  "Total number of requests per city",
+		"cities": {
+			txt:  "Number of requests per city (top-N in time window)",
 			lbls: []string{"city", "country"},
 		},
 	} {
@@ -205,13 +225,6 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	}
 
 	ch <- e.totalScrapes.Desc()
-
-	ch <- prometheus.NewDesc(
-		prometheus.BuildFQName("xray", "", "requested_domain_ip_total"),
-		"Total number of requests per domain or IP",
-		[]string{"target"},
-		nil,
-	)
 }
 
 // Connects to Xray's gRPC API and collects all available metrics.
@@ -282,17 +295,18 @@ func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheu
 	sysResp := resp.(*command.SysStatsResponse)
 	e.registerConstMetricGauge(ch, "uptime_seconds", float64(sysResp.GetUptime()))
 
-	// Memory and runtime metrics following Go collector naming conventions
+	// Memory and runtime metrics following Go collector naming conventions.
+	// Current-value readings are gauges; cumulative counts carry _total and are counters.
 	e.registerConstMetricGauge(ch, "goroutines", float64(sysResp.GetNumGoroutine()))
 	e.registerConstMetricGauge(ch, "memstats_alloc_bytes", float64(sysResp.GetAlloc()))
-	e.registerConstMetricGauge(ch, "memstats_alloc_bytes_total", float64(sysResp.GetTotalAlloc()))
+	e.registerConstMetricCounter(ch, "memstats_alloc_bytes_total", float64(sysResp.GetTotalAlloc()))
 	e.registerConstMetricGauge(ch, "memstats_sys_bytes", float64(sysResp.GetSys()))
-	e.registerConstMetricGauge(ch, "memstats_mallocs_total", float64(sysResp.GetMallocs()))
-	e.registerConstMetricGauge(ch, "memstats_frees_total", float64(sysResp.GetFrees()))
+	e.registerConstMetricCounter(ch, "memstats_mallocs_total", float64(sysResp.GetMallocs()))
+	e.registerConstMetricCounter(ch, "memstats_frees_total", float64(sysResp.GetFrees()))
 
 	// Additional memory metrics not in standard Go collector
-	e.registerConstMetricGauge(ch, "memstats_num_gc", float64(sysResp.GetNumGC()))
-	e.registerConstMetricGauge(ch, "memstats_pause_total_ns", float64(sysResp.GetPauseTotalNs()))
+	e.registerConstMetricCounter(ch, "memstats_num_gc", float64(sysResp.GetNumGC()))
+	e.registerConstMetricCounter(ch, "memstats_pause_total_ns", float64(sysResp.GetPauseTotalNs()))
 
 	return nil
 }
@@ -389,12 +403,7 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	metricDesc := prometheus.NewDesc(
-		prometheus.BuildFQName("xray", "", "requested_domain_ip_total"),
-		"Total number of requests per domain or IP",
-		[]string{"target"},
-		nil,
-	)
+	metricDesc := e.metricDescriptions["requested_domain_ip"]
 
 	// Only export the top domains and IPs to prevent cardinality leak.
 	// These are gauges: the backing counts are periodically trimmed to the
@@ -413,12 +422,7 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	metricDesc := prometheus.NewDesc(
-		prometheus.BuildFQName("xray", "", "outbound_requests_total"),
-		"Total number of requests per outbound",
-		[]string{"outbound"},
-		nil,
-	)
+	metricDesc := e.metricDescriptions["outbound_requests"]
 
 	// Only export the top outbounds to prevent cardinality leak (gauge, see note above).
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
@@ -440,7 +444,7 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		if len(parts) > 1 {
 			org = parts[1]
 		}
-		e.registerConstMetricGauge(ch, "asns_total", float64(entry.count), asn, org)
+		e.registerConstMetricGauge(ch, "asns", float64(entry.count), asn, org)
 	}
 }
 
@@ -451,7 +455,7 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 	}
 
 	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
-		e.registerConstMetricGauge(ch, "countries_total", float64(entry.count), entry.key)
+		e.registerConstMetricGauge(ch, "countries", float64(entry.count), entry.key)
 	}
 }
 
@@ -469,7 +473,7 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		if len(parts) > 1 {
 			country = parts[1]
 		}
-		e.registerConstMetricGauge(ch, "cities_total", float64(entry.count), city, country)
+		e.registerConstMetricGauge(ch, "cities", float64(entry.count), city, country)
 	}
 }
 
