@@ -30,7 +30,7 @@ var opts struct {
 	LogTimeWindowMinutes   int    `short:"w" long:"log-time-window" description:"Time window in minutes for user metrics" value-name:"N"`
 	GeoIPDir               string `short:"g" long:"geoip-dir" description:"Directory for GeoLite2 databases" value-name:"PATH" default:"."`
 	Version                bool   `long:"version" description:"Display the version and exit"`
-	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: warn)" value-name:"LEVEL"`
+	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: info)" value-name:"LEVEL"`
 }
 
 // Build information injected during compilation
@@ -56,8 +56,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // configureLogging sets the global logrus level. Precedence: the --log-level
-// flag, then the LOG_LEVEL env var, then "warn". Only error, warn, info, and
-// debug are accepted; anything else is non-fatal and falls back to warn, so a
+// flag, then the LOG_LEVEL env var, then "info". Only error, warn, info, and
+// debug are accepted; anything else is non-fatal and falls back to info, so a
 // typo never stops startup.
 func configureLogging(flagLevel string) {
 	levelStr := flagLevel
@@ -65,7 +65,7 @@ func configureLogging(flagLevel string) {
 		levelStr = os.Getenv("LOG_LEVEL")
 	}
 	if levelStr == "" {
-		levelStr = "warn"
+		levelStr = "info"
 	}
 
 	var level logrus.Level
@@ -79,8 +79,8 @@ func configureLogging(flagLevel string) {
 	case "debug":
 		level = logrus.DebugLevel
 	default:
-		logrus.Warnf("invalid log level %q, defaulting to warn", levelStr)
-		level = logrus.WarnLevel
+		logrus.Warnf("invalid log level %q, defaulting to info", levelStr)
+		level = logrus.InfoLevel
 	}
 	logrus.SetLevel(level)
 }
@@ -96,8 +96,8 @@ func main() {
 
 	configureLogging(opts.LogLevel)
 
-	// Print the identity banner directly so it is never hidden by the log level
-	// (the default is warn, which would otherwise suppress this and --version).
+	// Print the identity banner directly so it is never hidden regardless of the
+	// configured log level (e.g. --log-level error), which also covers --version.
 	fmt.Printf("Xray Exporter %v-%v (built %v)\n", buildVersion, buildCommit, buildDate)
 
 	if opts.Version {
