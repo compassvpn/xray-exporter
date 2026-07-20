@@ -30,14 +30,6 @@ const (
 	MaxTrackedASNs      = 20 // Keep only top 20 ASNs
 	MaxTrackedCountries = 20 // Keep only top 20 countries
 	MaxTrackedCities    = 20 // Keep only top 20 cities
-
-	// Emergency cleanup thresholds to prevent unlimited growth
-	MaxDomainsBeforeCleanup   = 100 // Force cleanup if domains exceed this (small buffer)
-	MaxIPsBeforeCleanup       = 40  // Force cleanup if IPs exceed this (small buffer)
-	MaxOutboundsBeforeCleanup = 20  // Force cleanup if outbounds exceed this
-	MaxASNsBeforeCleanup      = 100
-	MaxCountriesBeforeCleanup = 100
-	MaxCitiesBeforeCleanup    = 100
 )
 
 // Represents a parsed line from the Xray access log.
@@ -222,23 +214,6 @@ func (p *Parser) trimToTopN() {
 	p.metrics.CityCounts = keepTopN(p.metrics.CityCounts, MaxTrackedCities)
 }
 
-// Emergency cleanup if maps grow too large between regular cleanups
-func (p *Parser) checkEmergencyCleanup() {
-	p.metrics.mu.RLock()
-	needCleanup := len(p.metrics.DomainCounts) > MaxDomainsBeforeCleanup ||
-		len(p.metrics.IPCounts) > MaxIPsBeforeCleanup ||
-		len(p.metrics.OutboundCounts) > MaxOutboundsBeforeCleanup ||
-		len(p.metrics.ASNCounts) > MaxASNsBeforeCleanup ||
-		len(p.metrics.CountryCounts) > MaxCountriesBeforeCleanup ||
-		len(p.metrics.CityCounts) > MaxCitiesBeforeCleanup
-	p.metrics.mu.RUnlock()
-
-	if needCleanup {
-		logrus.Debug("Emergency cleanup triggered - too many domains/IPs")
-		p.trimToTopN()
-	}
-}
-
 // Keeps only the top N entries by count from a map
 func keepTopN(counts map[string]int64, n int) map[string]int64 {
 	if len(counts) <= n {
@@ -415,26 +390,21 @@ func (p *Parser) GetCityCounts() map[string]int64 {
 }
 
 // Continuously monitors the log file for changes and processes new entries.
-// Runs every 5 seconds to balance responsiveness with system overhead.
-// Also performs periodic cardinality cleanup every 30 seconds for aggressive control.
+// Runs every 5 seconds to balance responsiveness with system overhead, trimming
+// cardinality right after each parse so a single pass bounds map growth.
 func (p *Parser) parseLoop() {
 	ticker := time.NewTicker(5 * time.Second)
-	cleanupTicker := time.NewTicker(30 * time.Second) // More frequent cleanup
 	defer ticker.Stop()
-	defer cleanupTicker.Stop()
 
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		case <-cleanupTicker.C:
-			p.trimToTopN()
 		case <-ticker.C:
 			if err := p.parseLogFile(); err != nil {
 				logrus.WithError(err).Warn("Failed to parse log file")
 			}
-			// Check for emergency cleanup after processing logs
-			p.checkEmergencyCleanup()
+			p.trimToTopN()
 		}
 	}
 }
