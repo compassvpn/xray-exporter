@@ -31,6 +31,7 @@ var opts struct {
 	GeoIPDir               string `short:"g" long:"geoip-dir" description:"Directory for GeoLite2 databases" value-name:"PATH" default:"."`
 	Version                bool   `long:"version" description:"Display the version and exit"`
 	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: info)" value-name:"LEVEL"`
+	LogFormat              string `long:"log-format" description:"Log format: text, json (env: LOG_FORMAT) (default: text)" value-name:"FORMAT"`
 }
 
 // Build information injected during compilation
@@ -55,19 +56,22 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// configureLogging sets the global logrus level. Precedence: the --log-level
-// flag, then the LOG_LEVEL env var, then "info". Only error, warn, info, and
-// debug are accepted; anything else is non-fatal and falls back to info, so a
-// typo never stops startup.
-func configureLogging(flagLevel string) {
-	levelStr := flagLevel
-	if levelStr == "" {
-		levelStr = os.Getenv("LOG_LEVEL")
+// firstNonEmpty returns the first non-empty string, or "" if all are empty.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	if levelStr == "" {
-		levelStr = "info"
-	}
+	return ""
+}
 
+// configureLogging sets the global logrus level and output format. For each,
+// precedence is the flag, then the env var, then the default (info level, text
+// format). Unrecognized values are non-fatal and fall back to the default, so a
+// typo never stops startup.
+func configureLogging(flagLevel, flagFormat string) {
+	levelStr := firstNonEmpty(flagLevel, os.Getenv("LOG_LEVEL"), "info")
 	var level logrus.Level
 	switch strings.ToLower(levelStr) {
 	case "error":
@@ -83,6 +87,17 @@ func configureLogging(flagLevel string) {
 		level = logrus.InfoLevel
 	}
 	logrus.SetLevel(level)
+
+	formatStr := firstNonEmpty(flagFormat, os.Getenv("LOG_FORMAT"), "text")
+	switch strings.ToLower(formatStr) {
+	case "text":
+		logrus.SetFormatter(&logrus.TextFormatter{})
+	case "json":
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+	default:
+		logrus.Warnf("invalid log format %q, defaulting to text", formatStr)
+		logrus.SetFormatter(&logrus.TextFormatter{})
+	}
 }
 
 func main() {
@@ -94,7 +109,7 @@ func main() {
 		logrus.WithError(err).Fatal("Failed to parse flags")
 	}
 
-	configureLogging(opts.LogLevel)
+	configureLogging(opts.LogLevel, opts.LogFormat)
 
 	// Print the identity banner directly so it is never hidden regardless of the
 	// configured log level (e.g. --log-level error), which also covers --version.
