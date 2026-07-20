@@ -91,8 +91,9 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		"memstats_pause_total_ns":    {txt: "Cumulative nanoseconds in GC stop-the-world pauses"},
 
 		// User activity metrics from log parsing.
-		// The per-target counts below are gauges: they are trimmed to top-N each
-		// scrape, so the value is not monotonic and must not carry a _total suffix.
+		// The per-target counts below are gauges: keys are expired out of the time
+		// window and only the top-N are exported each scrape, so the value is not
+		// monotonic and must not carry a _total suffix.
 		"unique_users":      {txt: "Number of unique users in time window"},
 		"total_connections": {txt: "Total number of connections in time window"},
 		"requested_domain_ip": {
@@ -406,8 +407,8 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 	metricDesc := e.metricDescriptions["requested_domain_ip"]
 
 	// Only export the top domains and IPs to prevent cardinality leak.
-	// These are gauges: the backing counts are periodically trimmed to the
-	// top-N, so the value is not monotonic and must not be treated as a counter.
+	// These are gauges: the backing keys are expired out of the time window, so
+	// the value is not monotonic and must not be treated as a counter.
 	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
 		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
