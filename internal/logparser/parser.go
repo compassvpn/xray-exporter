@@ -263,7 +263,9 @@ func expireCounts(m map[string]*windowedCount, cutoff time.Time) {
 	slices.SortFunc(entries, func(a, b countEntry) int {
 		return cmp.Compare(b.count, a.count)
 	})
-	for _, e := range entries[SafetyMaxKeys:] {
+	dropped := entries[SafetyMaxKeys:]
+	logrus.Debugf("key cap hit: dropped %d low-count keys over SafetyMaxKeys", len(dropped))
+	for _, e := range dropped {
 		delete(m, e.key)
 	}
 }
