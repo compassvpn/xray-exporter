@@ -479,13 +479,23 @@ func (p *Parser) parseLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
+	// Track the last parse error so a persistent failure (missing file, bad
+	// permissions) is logged once on change rather than every 5s tick.
+	var lastErrMsg string
+
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-ticker.C:
 			if err := p.parseLogFile(); err != nil {
-				logrus.WithError(err).Warn("Failed to parse log file")
+				if msg := err.Error(); msg != lastErrMsg {
+					logrus.WithError(err).Warn("Failed to parse log file")
+					lastErrMsg = msg
+				}
+			} else if lastErrMsg != "" {
+				logrus.Info("Log file parsing recovered")
+				lastErrMsg = ""
 			}
 			cutoff := time.Now().Add(-p.timeWindow)
 			p.expireWindowed(cutoff)
