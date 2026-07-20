@@ -53,7 +53,9 @@ func scrapeHandler(exporter *Exporter) http.HandlerFunc {
 // Simple health check endpoint
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	if _, err := w.Write([]byte("OK")); err != nil {
+		logrus.WithError(err).Debug("Failed to write health check response")
+	}
 }
 
 // firstNonEmpty returns the first non-empty string, or "" if all are empty.
