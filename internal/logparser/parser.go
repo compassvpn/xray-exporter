@@ -214,6 +214,29 @@ func (p *Parser) trimToTopN() {
 	p.metrics.CityCounts = keepTopN(p.metrics.CityCounts, MaxTrackedCities)
 }
 
+// Drops user activity that has aged out of the time window: expired unique IPs
+// and connection timestamps at the tail of the circular buffer. Runs on the
+// parse loop so memory is reclaimed regardless of scrape traffic.
+func (p *Parser) expireWindowed(cutoff time.Time) {
+	p.metrics.mu.Lock()
+	defer p.metrics.mu.Unlock()
+
+	for ip, lastSeen := range p.metrics.UniqueIPs {
+		if !lastSeen.After(cutoff) {
+			delete(p.metrics.UniqueIPs, ip)
+		}
+	}
+
+	bufCap := p.metrics.ConnectionsBufCap
+	for p.metrics.ConnectionsBufSize > 0 {
+		tail := ((p.metrics.ConnectionsBufHead-p.metrics.ConnectionsBufSize)%bufCap + bufCap) % bufCap
+		if p.metrics.ConnectionTimestamps[tail].After(cutoff) {
+			break
+		}
+		p.metrics.ConnectionsBufSize--
+	}
+}
+
 // Keeps only the top N entries by count from a map
 func keepTopN(counts map[string]int64, n int) map[string]int64 {
 	if len(counts) <= n {
@@ -302,43 +325,37 @@ func (p *Parser) Stop() {
 	p.cancel()
 }
 
-// Returns current user activity metrics within the time window.
-// Also performs cleanup of expired data to prevent memory leaks.
+// Returns current user activity metrics within the time window: unique users
+// and total connections. It is read-only. Reclaiming aged-out entries happens on
+// the parse loop (see expireWindowed), so the counts stay correct even when
+// scrapes pause and a scrape never mutates parser state.
 func (p *Parser) GetMetrics() (int, int64) {
-	p.metrics.mu.Lock()
-	defer p.metrics.mu.Unlock()
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
 
 	cutoff := time.Now().Add(-p.timeWindow)
 
-	// Clean up expired IPs efficiently
 	activeIPs := 0
-	expiredIPs := make([]string, 0, len(p.metrics.UniqueIPs)/10) // Pre-allocate for ~10% expired
-	for ip, lastSeen := range p.metrics.UniqueIPs {
+	for _, lastSeen := range p.metrics.UniqueIPs {
 		if lastSeen.After(cutoff) {
 			activeIPs++
-		} else {
-			expiredIPs = append(expiredIPs, ip)
 		}
 	}
 
-	// Remove expired IPs in separate loop to avoid iterator invalidation
-	for _, ip := range expiredIPs {
-		delete(p.metrics.UniqueIPs, ip)
-	}
-
-	// Expire connection timestamps from the oldest end. Because entries are
-	// stored chronologically, we only walk the newly-expired tail, and the
-	// remaining size IS the in-window connection count (amortized O(1)).
+	// Connections are stored chronologically, so aged-out entries sit at the
+	// oldest (tail) end. Count how many trailing entries have expired and
+	// subtract; the remainder is the in-window connection count.
 	bufCap := p.metrics.ConnectionsBufCap
-	for p.metrics.ConnectionsBufSize > 0 {
-		tail := ((p.metrics.ConnectionsBufHead-p.metrics.ConnectionsBufSize)%bufCap + bufCap) % bufCap
+	expired := 0
+	for expired < p.metrics.ConnectionsBufSize {
+		tail := ((p.metrics.ConnectionsBufHead-p.metrics.ConnectionsBufSize+expired)%bufCap + bufCap) % bufCap
 		if p.metrics.ConnectionTimestamps[tail].After(cutoff) {
 			break
 		}
-		p.metrics.ConnectionsBufSize--
+		expired++
 	}
 
-	return activeIPs, int64(p.metrics.ConnectionsBufSize)
+	return activeIPs, int64(p.metrics.ConnectionsBufSize - expired)
 }
 
 // Returns a copy of current domain request counts.
@@ -404,6 +421,7 @@ func (p *Parser) parseLoop() {
 			if err := p.parseLogFile(); err != nil {
 				logrus.WithError(err).Warn("Failed to parse log file")
 			}
+			p.expireWindowed(time.Now().Add(-p.timeWindow))
 			p.trimToTopN()
 		}
 	}
