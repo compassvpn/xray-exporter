@@ -12,7 +12,7 @@ require (
 	github.com/xtls/xray-core v1.260327.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 )
 
 require (
