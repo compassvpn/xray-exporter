@@ -21,32 +21,29 @@ const (
 	cityFile    = "GeoLite2-City.mmdb"
 	countryFile = "GeoLite2-Country.mmdb"
 
-	// userAgent identifies this client to the upstream host.
+	// Identifies this client to the upstream host.
 	userAgent = "xray-exporter (+https://github.com/compassvpn/xray-exporter)"
 
-	// dbMaxAge is how long an existing database is considered fresh enough to
-	// skip re-downloading on startup.
+	// How long an existing database is considered fresh enough to skip
+	// re-downloading on startup.
 	dbMaxAge = 7 * 24 * time.Hour
 
-	// downloadTimeout bounds a single download attempt.
+	// Bounds a single download attempt.
 	downloadTimeout = 60 * time.Second
 )
 
-// Dir is the directory where GeoLite2 databases are stored and read from.
+// Directory where GeoLite2 databases are stored and read from.
 // Override it (e.g. from a --geoip-dir flag) before calling DownloadDB.
 var Dir = "."
 
-// ASNPath returns the path to the GeoLite2 ASN database.
 func ASNPath() string { return filepath.Join(Dir, asnFile) }
 
-// CityPath returns the path to the GeoLite2 City database.
 func CityPath() string { return filepath.Join(Dir, cityFile) }
 
-// CountryPath returns the path to the GeoLite2 Country database.
 func CountryPath() string { return filepath.Join(Dir, countryFile) }
 
-// DownloadDB downloads the latest GeoLite2 databases with retries, skipping any
-// that already exist locally and are recent enough.
+// Downloads the latest GeoLite2 databases with retries, skipping any that
+// already exist locally and are recent enough.
 func DownloadDB() error {
 	if err := os.MkdirAll(Dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create GeoIP directory %q: %w", Dir, err)
@@ -74,7 +71,7 @@ func DownloadDB() error {
 	return nil
 }
 
-// isFresh reports whether path exists, is non-empty, and was modified within dbMaxAge.
+// Reports whether path exists, is non-empty, and was modified within dbMaxAge.
 func isFresh(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -102,8 +99,8 @@ func downloadWithRetry(client *http.Client, name, url, path string) error {
 	return fmt.Errorf("failed to download GeoLite2-%s database after %d attempts: %w", name, maxRetries, lastErr)
 }
 
-// downloadFile streams url to a temp file in the same directory and atomically
-// renames it into place, so a failed download never corrupts an existing DB.
+// Streams url to a temp file in the same directory and atomically renames it
+// into place, so a failed download never corrupts an existing DB.
 func downloadFile(client *http.Client, path, url string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
 	defer cancel()

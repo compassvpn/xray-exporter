@@ -1,5 +1,3 @@
-// IP filtering functionality to exclude system and internal traffic
-// from user metrics. Helps focus on real user activity rather than infrastructure noise.
 package logparser
 
 import (
@@ -12,14 +10,14 @@ import (
 // Uses multiple strategies: exact matches for system IPs, network ranges for private IPs,
 // and an LRU cache (O(1) eviction) to avoid repeated expensive lookups.
 type IPFilter struct {
-	systemIPs   map[string]bool // Known system/localhost addresses
-	dnsServers  map[string]bool // Common public DNS servers
-	privateNets []*net.IPNet    // Private network ranges (RFC 1918, etc.)
+	systemIPs   map[string]bool // known system/localhost addresses.
+	dnsServers  map[string]bool // common public DNS servers.
+	privateNets []*net.IPNet    // private network ranges (RFC 1918, etc.).
 
-	mu           sync.Mutex               // Protects the LRU cache
-	cache        map[string]*list.Element // ip -> element in lru
-	lru          *list.List               // most-recently-used at the front
-	maxCacheSize int                      // Maximum cache entries before eviction
+	mu           sync.Mutex               // protects the LRU cache.
+	cache        map[string]*list.Element // ip -> element in lru.
+	lru          *list.List               // most-recently-used at the front.
+	maxCacheSize int                      // maximum cache entries before eviction.
 }
 
 // Stores a cached filter result for one IP.
@@ -39,7 +37,6 @@ func NewIPFilter() *IPFilter {
 		maxCacheSize: 100000,
 	}
 
-	// System and localhost addresses
 	systemIPs := []string{
 		"127.0.0.1",
 		"localhost",
@@ -49,7 +46,7 @@ func NewIPFilter() *IPFilter {
 		filter.systemIPs[ip] = true
 	}
 
-	// Common public DNS servers - these generate noise in proxy logs
+	// Common public DNS servers; these generate noise in proxy logs.
 	dnsServers := []string{
 		// Cloudflare DNS
 		"1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
@@ -76,13 +73,13 @@ func NewIPFilter() *IPFilter {
 		filter.dnsServers[ip] = true
 	}
 
-	// Private network ranges (RFC 1918 and IPv6 equivalents)
+	// Private network ranges (RFC 1918 and IPv6 equivalents).
 	privateNetworks := []string{
-		"10.0.0.0/8",     // Class A private networks
-		"172.16.0.0/12",  // Class B private networks
-		"192.168.0.0/16", // Class C private networks
-		"fc00::/7",       // IPv6 unique local addresses
-		"fe80::/10",      // IPv6 link-local addresses
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"fc00::/7",  // IPv6 unique local addresses.
+		"fe80::/10", // IPv6 link-local addresses.
 	}
 
 	for _, cidr := range privateNetworks {
@@ -130,10 +127,9 @@ func (f *IPFilter) ShouldFilter(ip string) bool {
 	return result
 }
 
-// Performs the actual filtering logic without caching.
-// Checks system IPs, DNS servers, and private network ranges in order of efficiency.
+// Performs the actual filtering logic without caching: system IPs, DNS
+// servers, then private network ranges.
 func (f *IPFilter) shouldFilterInternal(ip string) bool {
-	// Check exact matches first (fastest)
 	if f.systemIPs[ip] {
 		return true
 	}
@@ -142,19 +138,16 @@ func (f *IPFilter) shouldFilterInternal(ip string) bool {
 		return true
 	}
 
-	// Parse IP for network range checks
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
-		return true // Filter invalid IPs
+		return true // Filter invalid IPs.
 	}
 
-	// Check if IP falls within private network ranges
 	for _, ipNet := range f.privateNets {
 		if ipNet.Contains(parsedIP) {
 			return true
 		}
 	}
 
-	// IP is not filtered - it's a real user
 	return false
 }
