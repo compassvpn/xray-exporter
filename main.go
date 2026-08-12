@@ -19,7 +19,6 @@ import (
 	"xray-exporter/internal/geoip"
 )
 
-// Command line configuration
 var opts struct {
 	Listen                 string `short:"l" long:"listen" description:"Listen address" value-name:"[ADDR]:PORT" default:":9550"`
 	MetricsPath            string `short:"m" long:"metrics-path" description:"Metrics path" value-name:"PATH" default:"/scrape"`
@@ -34,14 +33,13 @@ var opts struct {
 	LogFormat              string `long:"log-format" description:"Log format: text, json (env: LOG_FORMAT) (default: text)" value-name:"FORMAT"`
 }
 
-// Build information injected during compilation
+// Build information injected during compilation.
 var (
 	buildVersion = "dev"
 	buildCommit  = "none"
 	buildDate    = "unknown"
 )
 
-// Creates an HTTP handler for the Prometheus scrape endpoint
 func scrapeHandler(exporter *Exporter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		promhttp.HandlerFor(
@@ -50,7 +48,6 @@ func scrapeHandler(exporter *Exporter) http.HandlerFunc {
 	}
 }
 
-// Simple health check endpoint
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("OK")); err != nil {
@@ -58,7 +55,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// firstNonEmpty returns the first non-empty string, or "" if all are empty.
+// Returns the first non-empty string, or "" if all are empty.
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
@@ -68,10 +65,9 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// configureLogging sets the global logrus level and output format. For each,
-// precedence is the flag, then the env var, then the default (info level, text
-// format). Unrecognized values are non-fatal and fall back to the default, so a
-// typo never stops startup.
+// Sets the global logrus level and output format. For each, precedence is the
+// flag, then the env var, then the default (info level, text format).
+// Unrecognized values fall back to the default, so a typo never stops startup.
 func configureLogging(flagLevel, flagFormat string) {
 	levelStr := firstNonEmpty(flagLevel, os.Getenv("LOG_LEVEL"), "info")
 	var level logrus.Level
@@ -103,7 +99,6 @@ func configureLogging(flagLevel, flagFormat string) {
 }
 
 func main() {
-	// Parse command line arguments
 	if _, err := flags.Parse(&opts); err != nil {
 		if flagsErr, ok := err.(*flags.Error); ok && flagsErr.Type == flags.ErrHelp {
 			return
@@ -128,10 +123,8 @@ func main() {
 		logrus.WithError(err).Warn("Failed to initialize GeoIP database, GeoIP metrics will be unavailable")
 	}
 
-	// Initialize exporter with configuration
 	scrapeTimeout := time.Duration(opts.ScrapeTimeoutInSeconds) * time.Second
 
-	// Use default time window if not specified
 	timeWindowMinutes := opts.LogTimeWindowMinutes
 	if timeWindowMinutes == 0 {
 		timeWindowMinutes = DefaultLogTimeWindowMinutes
@@ -143,7 +136,6 @@ func main() {
 	}
 	defer exporter.Close()
 
-	// Set up HTTP routes
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc(opts.MetricsPath, scrapeHandler(exporter))
@@ -162,7 +154,6 @@ func main() {
 `, buildVersion, opts.MetricsPath)
 	})
 
-	// Configure HTTP server with reasonable timeouts
 	server := &http.Server{
 		Addr:         opts.Listen,
 		Handler:      mux,
@@ -181,7 +172,6 @@ func main() {
 		}
 	}()
 
-	// Wait for a shutdown signal or a server startup error.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -194,7 +184,6 @@ func main() {
 
 	logrus.Info("Shutting down server...")
 
-	// Graceful shutdown with 30 second timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

@@ -1,7 +1,5 @@
 //go:build unix
 
-// Cross-platform file tracking functionality.
-// This Unix implementation uses actual inode numbers for reliable log rotation detection.
 package logparser
 
 import (
@@ -9,8 +7,7 @@ import (
 	"syscall"
 )
 
-// Returns the inode number of a file on Unix systems.
-// Inodes are unique identifiers that help detect when log files are rotated or replaced.
+// Returns the inode number of a file, used to detect log rotation.
 // Returns 0 if the inode cannot be determined (rare on Unix systems).
 func getInode(_ *os.File, fileInfo os.FileInfo) uint64 {
 	if stat, ok := fileInfo.Sys().(*syscall.Stat_t); ok {

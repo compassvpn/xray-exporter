@@ -1,6 +1,5 @@
-// Parses Xray access logs and extracts user metrics.
-// Monitors log files for changes and maintains real-time statistics about user activity,
-// domain requests, and connection patterns.
+// Parses Xray access logs and extracts user metrics: user activity, domain
+// requests, and connection patterns within a rolling time window.
 package logparser
 
 import (
@@ -21,17 +20,17 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// Cardinality limits to prevent excessive metric series
+// Cardinality limits: only the top-N keys per metric are exported.
 const (
-	MaxTrackedDomains   = 20 // Keep only top 20 domains for pie chart
-	MaxTrackedIPs       = 20 // Keep only top 20 IPs for pie chart
-	MaxTrackedOutbounds = 10 // Keep only top 10 outbounds
-	MaxTrackedASNs      = 20 // Keep only top 20 ASNs
-	MaxTrackedCountries = 20 // Keep only top 20 countries
-	MaxTrackedCities    = 20 // Keep only top 20 cities
+	MaxTrackedDomains   = 20
+	MaxTrackedIPs       = 20
+	MaxTrackedOutbounds = 10
+	MaxTrackedASNs      = 20
+	MaxTrackedCountries = 20
+	MaxTrackedCities    = 20
 
-	// SafetyMaxKeys caps distinct keys held per metric as a memory backstop
-	// against high-cardinality bursts (e.g. random-subdomain floods). It sits far
+	// Caps distinct keys held per metric as a memory backstop against
+	// high-cardinality bursts (e.g. random-subdomain floods). It sits far
 	// above the exported top-N, so it never disturbs the series actually scraped.
 	SafetyMaxKeys = 10000
 )
@@ -43,10 +42,8 @@ type LogEntry struct {
 	ParsedIP  net.IP
 }
 
-// windowedCount tracks a per-key request count together with the last time the
-// key was seen. Keeping last-seen lets idle keys be expired out of the time
-// window instead of being dropped by rank, which discarded live keys' history
-// and let stale winners stick around forever.
+// A per-key request count together with the last time the key was seen, so
+// idle keys can be expired out of the time window.
 type windowedCount struct {
 	count    int64
 	lastSeen time.Time
@@ -55,24 +52,24 @@ type windowedCount struct {
 // Holds collected metrics for a specified time window.
 // Uses a circular buffer for connection timestamps to prevent memory growth.
 type MetricsData struct {
-	UniqueIPs      map[string]time.Time      // IP -> last seen time
-	DomainCounts   map[string]*windowedCount // domain -> count + last seen
-	IPCounts       map[string]*windowedCount // direct IP requests -> count + last seen
-	OutboundCounts map[string]*windowedCount // outbound -> count + last seen
-	ASNCounts      map[string]*windowedCount // ASN -> count + last seen (key: asn|org)
-	CountryCounts  map[string]*windowedCount // country -> count + last seen (labels: country)
-	CityCounts     map[string]*windowedCount // city -> count + last seen (labels: city, country)
+	UniqueIPs      map[string]time.Time // IP -> last seen time.
+	DomainCounts   map[string]*windowedCount
+	IPCounts       map[string]*windowedCount // direct-IP requests.
+	OutboundCounts map[string]*windowedCount
+	ASNCounts      map[string]*windowedCount // key format: asn|org.
+	CountryCounts  map[string]*windowedCount
+	CityCounts     map[string]*windowedCount // key format: city|country.
 
 	// Circular buffer for connection timestamps to limit memory usage.
 	// The backing slice grows lazily up to ConnectionsBufCap so low-traffic
 	// servers don't pay the full allocation upfront.
-	ConnectionTimestamps []time.Time // circular buffer of connection timestamps
-	ConnectionsBufHead   int         // current write position in buffer
-	ConnectionsBufSize   int         // number of in-window entries currently held
-	ConnectionsBufCap    int         // maximum buffer capacity
+	ConnectionTimestamps []time.Time
+	ConnectionsBufHead   int // current write position in buffer.
+	ConnectionsBufSize   int // number of in-window entries currently held.
+	ConnectionsBufCap    int // maximum buffer capacity.
 
-	LastPos   int64  // last position read in log file
-	LastInode uint64 // last inode of log file (for rotation detection)
+	LastPos   int64  // last position read in log file.
+	LastInode uint64 // last inode of log file, for rotation detection.
 	mu        sync.RWMutex
 }
 
@@ -87,7 +84,6 @@ type Parser struct {
 	cancel     context.CancelFunc
 	mu         sync.Mutex
 
-	// GeoIP readers for real-time tracking
 	asnReader     *geoip2.Reader
 	countryReader *geoip2.Reader
 	cityReader    *geoip2.Reader
@@ -102,7 +98,6 @@ type Config struct {
 	CityReader    *geoip2.Reader
 }
 
-// Regular expressions for parsing different log line formats
 var (
 	timestampRegex   = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})`)
 	newFormatIPRegex = regexp.MustCompile(`from (?:tcp:)?(\d+\.\d+\.\d+\.\d+|\S+):`)
@@ -110,9 +105,9 @@ var (
 	outboundRegex    = regexp.MustCompile(`\[[^\]]*?(?:->|>>)\s*([^\]]+?)\]`)
 )
 
-// metricsDelta accumulates a batch of parsed results so the expensive parsing
-// and GeoIP lookups can run WITHOUT holding the metrics lock. The deltas are
-// merged into the shared MetricsData under a brief lock at the end of a batch.
+// Accumulates a batch of parsed results so the expensive parsing and GeoIP
+// lookups can run without holding the metrics lock. The deltas are merged into
+// the shared MetricsData under a brief lock at the end of a batch.
 type metricsDelta struct {
 	domainCounts   map[string]*windowedCount
 	ipCounts       map[string]*windowedCount
@@ -136,7 +131,7 @@ func newMetricsDelta() *metricsDelta {
 	}
 }
 
-// recordCount increments the per-key count in m and advances its last-seen time.
+// Increments the per-key count in m and advances its last-seen time.
 func recordCount(m map[string]*windowedCount, key string, ts time.Time) {
 	wc := m[key]
 	if wc == nil {
@@ -150,24 +145,21 @@ func recordCount(m map[string]*windowedCount, key string, ts time.Time) {
 }
 
 // Performs quick checks to skip obviously invalid lines before expensive parsing.
-// Improves performance by filtering out non-log lines early.
 func shouldSkipLine(line string) bool {
-	// Skip empty or very short lines
-	if len(line) < 19 { // "2024/01/01 00:00:00" is 19 chars minimum
+	if len(line) < 19 { // "2024/01/01 00:00:00" is 19 chars minimum.
 		return true
 	}
 
-	// Quick check for timestamp pattern at start
+	// Cheap check for a timestamp shape at the start.
 	if len(line) < 4 || line[0] < '1' || line[0] > '9' || line[4] != '/' {
 		return true
 	}
 
-	// Skip comment lines
 	if strings.HasPrefix(line, "#") {
 		return true
 	}
 
-	// Must contain "from" for IP extraction
+	// Must contain "from" for IP extraction.
 	if !strings.Contains(line, "from ") {
 		return true
 	}
@@ -176,8 +168,7 @@ func shouldSkipLine(line string) bool {
 }
 
 // Extracts the registrable (eTLD+1) domain from a full domain name, using the
-// public suffix list so multi-part suffixes are handled correctly.
-// Example: a.sub.example.co.uk -> example.co.uk
+// public suffix list so multi-part suffixes like example.co.uk survive.
 func getRootDomain(domain string) string {
 	if domain == "" {
 		return ""
@@ -221,7 +212,7 @@ func (p *Parser) addConnectionTimestamp(ts time.Time) {
 	}
 }
 
-// Helper struct for sorting map entries by count
+// Pairs a metric key with its count for sorting.
 type countEntry struct {
 	key   string
 	count int64
@@ -293,24 +284,21 @@ func (p *Parser) expireWindowed(cutoff time.Time) {
 	}
 }
 
-// Keeps only the top N entries by count from a map
+// Keeps only the top n entries by count from a map.
 func keepTopN(counts map[string]int64, n int) map[string]int64 {
 	if len(counts) <= n {
 		return counts
 	}
 
-	// Convert to slice for sorting
 	entries := make([]countEntry, 0, len(counts))
 	for key, count := range counts {
 		entries = append(entries, countEntry{key: key, count: count})
 	}
 
-	// Sort by count (descending)
 	slices.SortFunc(entries, func(a, b countEntry) int {
 		return cmp.Compare(b.count, a.count)
 	})
 
-	// Keep only top N
 	result := make(map[string]int64, n)
 	for _, entry := range entries[:n] {
 		result[entry.key] = entry.count
@@ -331,13 +319,13 @@ func NewParser(config Config) (*Parser, error) {
 	var bufferCap int
 	switch {
 	case minutes <= 5:
-		bufferCap = 500000 // Short windows: up to 500K entries (~12MB)
+		bufferCap = 500000 // ~12MB.
 	case minutes <= 10:
-		bufferCap = 1000000 // Medium windows: up to 1M entries (~24MB)
+		bufferCap = 1000000 // ~24MB.
 	case minutes <= 30:
-		bufferCap = 2000000 // Long windows: up to 2M entries (~48MB)
+		bufferCap = 2000000 // ~48MB.
 	default:
-		bufferCap = 5000000 // Very long windows: up to 5M entries (~120MB)
+		bufferCap = 5000000 // ~120MB.
 	}
 
 	// Start small and let the buffer grow with traffic.
@@ -376,7 +364,7 @@ func (p *Parser) Start() error {
 	return nil
 }
 
-// Gracefully stops the log parser.
+// Stops background log monitoring.
 func (p *Parser) Stop() {
 	p.cancel()
 }
@@ -462,8 +450,8 @@ func (p *Parser) GetCityCounts() map[string]int64 {
 	return snapshotCounts(p.metrics.CityCounts)
 }
 
-// snapshotCounts returns a plain key->count copy, dropping the last-seen
-// bookkeeping so callers (the exporter) keep working with map[string]int64.
+// Returns a plain key->count copy, dropping the last-seen bookkeeping so
+// callers (the exporter) keep working with map[string]int64.
 func snapshotCounts(m map[string]*windowedCount) map[string]int64 {
 	out := make(map[string]int64, len(m))
 	for k, v := range m {
@@ -537,7 +525,6 @@ func (p *Parser) parseLogFile() error {
 	startPos := p.metrics.LastPos
 	p.mu.Unlock()
 
-	// Seek to last known position
 	if _, err := file.Seek(startPos, 0); err != nil {
 		return err
 	}
@@ -568,7 +555,6 @@ func (p *Parser) parseLogFile() error {
 	p.mergeDelta(delta)
 	p.metrics.mu.Unlock()
 
-	// Update file position for next read.
 	p.mu.Lock()
 	p.metrics.LastPos = newPos
 	p.mu.Unlock()
@@ -576,11 +562,10 @@ func (p *Parser) parseLogFile() error {
 	return nil
 }
 
-// processLine parses a single log line and records its data into delta.
+// Parses a single log line and records its data into delta.
 // It performs no shared-state mutation (the IP filter and GeoIP readers are
 // safe for concurrent use), so it can run without holding the metrics lock.
 func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta) {
-	// Quick pre-filtering to skip obviously invalid lines
 	if shouldSkipLine(line) {
 		return
 	}
@@ -607,21 +592,18 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		recordCount(delta.outboundCounts, outbound, entry.Timestamp)
 	}
 
-	// Skip entries outside time window (for user metrics only).
+	// User metrics below are time-windowed: skip entries outside the window.
 	if entry.Timestamp.Before(cutoff) {
 		return
 	}
 
-	// Filter out internal/system IPs.
 	if p.ipFilter.ShouldFilter(entry.IP) {
 		return
 	}
 
-	// Update user metrics (time-windowed).
 	delta.timestamps = append(delta.timestamps, entry.Timestamp)
 	delta.uniqueIPs[entry.IP] = entry.Timestamp
 
-	// Extract context for detailed tracking.
 	countryCode := "unknown"
 	cityName := "unknown"
 	asn := "unknown"
@@ -651,18 +633,17 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		}
 	}
 
-	// Update aggregated metrics.
 	if countryCode != "unknown" {
 		recordCount(delta.countryCounts, countryCode, entry.Timestamp)
 	}
 	if cityName != "unknown" {
 		recordCount(delta.cityCounts, cityName+"|"+countryCode, entry.Timestamp)
 	}
-	// Key format: asn|org
+	// Key format: asn|org.
 	recordCount(delta.asnCounts, asn+"|"+org, entry.Timestamp)
 }
 
-// mergeDelta folds a parsed batch into the shared metrics. Caller must hold metrics.mu.
+// Folds a parsed batch into the shared metrics. Caller must hold metrics.mu.
 func (p *Parser) mergeDelta(d *metricsDelta) {
 	mergeCounts(p.metrics.DomainCounts, d.domainCounts)
 	mergeCounts(p.metrics.IPCounts, d.ipCounts)
@@ -678,7 +659,7 @@ func (p *Parser) mergeDelta(d *metricsDelta) {
 	}
 }
 
-// mergeCounts folds src into dst, summing counts and keeping the latest last-seen.
+// Folds src into dst, summing counts and keeping the latest last-seen.
 func mergeCounts(dst, src map[string]*windowedCount) {
 	for k, v := range src {
 		wc := dst[k]
@@ -695,10 +676,9 @@ func mergeCounts(dst, src map[string]*windowedCount) {
 
 // Parses a single log line, extracting timestamp and client IP.
 func (p *Parser) parseLine(line string) (*LogEntry, error) {
-	// Parse timestamp
 	timestampMatch := timestampRegex.FindStringSubmatch(line)
 	if len(timestampMatch) < 2 {
-		return nil, nil // Skip lines without timestamp
+		return nil, nil // Skip lines without a timestamp.
 	}
 
 	// Xray writes local time, so parse in the local zone. Parsing as UTC would
@@ -708,26 +688,24 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 		return nil, err
 	}
 
-	// Extract IP with single pass through formats
 	var ip string
 	if match := newFormatIPRegex.FindStringSubmatch(line); len(match) > 1 {
 		ip = match[1]
 	} else if match := oldFormatIPRegex.FindStringSubmatch(line); len(match) > 1 {
 		if match[1] != "" {
-			ip = match[1] // IPv6
+			ip = match[1] // IPv6.
 		} else {
-			ip = match[2] // IPv4
+			ip = match[2] // IPv4.
 		}
 	}
 
 	if ip == "" {
-		return nil, nil // Skip lines without IP
+		return nil, nil // Skip lines without an IP.
 	}
 
-	// Normalize and parse the IP once, reusing the parsed value.
 	normalizedIP, parsedIP := normalizeIPParsed(ip)
 	if parsedIP == nil {
-		return nil, nil // Skip invalid IPs
+		return nil, nil // Skip invalid IPs.
 	}
 
 	return &LogEntry{
@@ -740,7 +718,6 @@ func (p *Parser) parseLine(line string) (*LogEntry, error) {
 // Performs a quick heuristic check for IP addresses without full parsing.
 // Avoids expensive net.ParseIP calls for obvious non-IP strings.
 func isIPAddressFast(s string) bool {
-	// Quick heuristic: if it contains only digits, dots, and colons, it might be an IP
 	for _, c := range s {
 		if !((c >= '0' && c <= '9') || c == '.' || c == ':' || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 			return false
@@ -749,15 +726,14 @@ func isIPAddressFast(s string) bool {
 	return strings.Contains(s, ".") || strings.Contains(s, ":")
 }
 
-// Extracts domain with fewer string operations than the standard method.
+// Extracts the destination host from the "accepted tcp:host:port" segment of a log line.
 func extractDomainOptimized(line string) string {
-	// Look for "accepted" keyword first to avoid extracting from client part
+	// Search after "accepted" only, so the client address is never matched.
 	acceptedIdx := strings.Index(line, "accepted ")
 	if acceptedIdx == -1 {
 		return ""
 	}
 
-	// Search for tcp: or udp: patterns AFTER "accepted"
 	searchArea := line[acceptedIdx:]
 	tcpIdx := strings.Index(searchArea, "tcp:")
 	udpIdx := strings.Index(searchArea, "udp:")
@@ -771,7 +747,6 @@ func extractDomainOptimized(line string) string {
 		return ""
 	}
 
-	// Find space to end the domain:port section
 	spaceIdx := strings.Index(line[startIdx:], " ")
 	if spaceIdx == -1 {
 		return ""
@@ -779,7 +754,7 @@ func extractDomainOptimized(line string) string {
 
 	domainPort := line[startIdx : startIdx+spaceIdx]
 
-	// Find last colon to separate domain from port
+	// Last colon, so IPv6 literals keep their inner colons.
 	colonIdx := strings.LastIndex(domainPort, ":")
 	if colonIdx == -1 {
 		return ""
@@ -788,8 +763,8 @@ func extractDomainOptimized(line string) string {
 	return domainPort[:colonIdx]
 }
 
-// normalizeIPParsed canonicalizes an IP address string and returns both the
-// canonical string form and the parsed net.IP, so callers don't parse twice.
+// Canonicalizes an IP address string and returns both the canonical string
+// form and the parsed net.IP, so callers don't parse twice.
 func normalizeIPParsed(ip string) (string, net.IP) {
 	ip = strings.Trim(ip, "[]")
 

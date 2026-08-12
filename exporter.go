@@ -1,4 +1,3 @@
-// Core exporter functionality for collecting Xray metrics.
 package main
 
 import (
@@ -22,7 +21,6 @@ import (
 	"xray-exporter/internal/logparser"
 )
 
-// Default time window for user activity metrics (in minutes)
 const DefaultLogTimeWindowMinutes = 5
 
 // Collects Xray metrics and exposes them in Prometheus format.
@@ -37,12 +35,12 @@ type Exporter struct {
 	metricDescriptions map[string]*prometheus.Desc
 	conn               *grpc.ClientConn
 
-	// Log parsing for user metrics
+	// Log parsing for user metrics.
 	logParser     *logparser.Parser
 	logPath       string
 	logTimeWindow time.Duration
 
-	// GeoIP for ASN lookups
+	// GeoIP readers for log enrichment.
 	geoipASNReader     *geoip2.Reader
 	geoipCityReader    *geoip2.Reader
 	geoipCountryReader *geoip2.Reader
@@ -66,21 +64,20 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		}),
 	}
 
-	// Initialize all metric descriptions
 	e.metricDescriptions = map[string]*prometheus.Desc{}
 
 	for k, desc := range map[string]struct {
 		txt  string
 		lbls []string
 	}{
-		// Core Xray metrics
+		// Core Xray metrics.
 		"up":                           {txt: "Indicate scrape succeeded or not"},
 		"scrape_duration_seconds":      {txt: "Scrape duration in seconds"},
 		"uptime_seconds":               {txt: "Xray uptime in seconds"},
 		"traffic_uplink_bytes_total":   {txt: "Number of transmitted bytes", lbls: []string{"dimension", "target"}},
 		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
 
-		// Xray runtime metrics from GetSysStats
+		// Xray runtime metrics from GetSysStats.
 		"goroutines":                 {txt: "Number of goroutines running in the Xray process"},
 		"memstats_alloc_bytes":       {txt: "Bytes of allocated heap objects"},
 		"memstats_alloc_bytes_total": {txt: "Cumulative bytes allocated for heap objects"},
@@ -122,8 +119,7 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 
 	e.registry.MustRegister(&e)
 
-	// Create simple gRPC connection
-	// No keepalive needed for short, infrequent calls every 15-30s
+	// No keepalive: calls are short and infrequent (one per 15-30s scrape).
 	conn, err := grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
@@ -142,7 +138,6 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 	}
 
 	if cityDB, err := geoip2.Open(geoip.CityPath()); err != nil {
-		// If city database is missing, we still continue but city/country metrics will be unknown
 		logrus.WithError(err).Warn("Failed to open GeoIP City database, city/country metrics will be unavailable")
 	} else {
 		e.geoipCityReader = cityDB
@@ -154,7 +149,6 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		e.geoipCountryReader = countryDB
 	}
 
-	// Initialize log parser if path provided
 	if logPath != "" && logPath != "disabled" {
 		if _, err := os.Stat(logPath); err != nil {
 			logrus.WithError(err).Warn("Log file not found, user metrics will not be available")
@@ -197,14 +191,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.totalScrapes.Inc()
 	start := time.Now()
 
-	// Attempt to scrape Xray metrics via gRPC
 	var up float64 = 1
 	if err := e.scrapeXray(ch); err != nil {
 		up = 0
 		logrus.WithError(err).Warn("Scrape failed")
 	}
 
-	// Collect log-based metrics
 	e.collectLogMetrics(ch)
 	e.collectDomainMetrics(ch)
 	e.collectOutboundMetrics(ch)
@@ -212,7 +204,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.collectCountryMetrics(ch)
 	e.collectCityMetrics(ch)
 
-	// Core metrics
 	e.registerConstMetricGauge(ch, "up", up)
 	e.registerConstMetricGauge(ch, "scrape_duration_seconds", time.Since(start).Seconds())
 
@@ -257,11 +248,10 @@ func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.M
 
 	statsResp := resp.(*command.QueryStatsResponse)
 	for _, s := range statsResp.GetStat() {
-		// Parse format: inbound>>>socks-proxy>>>traffic>>>uplink
+		// Stat name format: inbound>>>socks-proxy>>>traffic>>>uplink.
 		p := strings.Split(s.GetName(), ">>>")
 
-		// Skip names that don't match the expected 4-part format to avoid
-		// index-out-of-range panics on custom/unexpected stat names.
+		// Custom or unexpected stat names may not have all 4 parts.
 		if len(p) < 4 {
 			logrus.Debugf("skipping unexpected stat name %q", s.GetName())
 			continue
@@ -305,7 +295,7 @@ func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheu
 	e.registerConstMetricCounter(ch, "memstats_mallocs_total", float64(sysResp.GetMallocs()))
 	e.registerConstMetricCounter(ch, "memstats_frees_total", float64(sysResp.GetFrees()))
 
-	// Additional memory metrics not in standard Go collector
+	// Additional memory metrics not in the standard Go collector.
 	e.registerConstMetricCounter(ch, "memstats_num_gc", float64(sysResp.GetNumGC()))
 	e.registerConstMetricCounter(ch, "memstats_pause_total_ns", float64(sysResp.GetPauseTotalNs()))
 
@@ -425,7 +415,7 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 
 	metricDesc := e.metricDescriptions["outbound_requests"]
 
-	// Only export the top outbounds to prevent cardinality leak (gauge, see note above).
+	// Top-N only, to bound cardinality (gauge, see note in collectDomainMetrics).
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
 		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
@@ -438,7 +428,7 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 	}
 
 	for _, entry := range topN(e.logParser.GetASNCounts(), logparser.MaxTrackedASNs) {
-		// Key format: asn|org
+		// Key format: asn|org.
 		parts := strings.Split(entry.key, "|")
 		asn := parts[0]
 		org := ""
@@ -467,7 +457,7 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 	}
 
 	for _, entry := range topN(e.logParser.GetCityCounts(), logparser.MaxTrackedCities) {
-		// Key format: city|country
+		// Key format: city|country.
 		parts := strings.Split(entry.key, "|")
 		city := parts[0]
 		country := ""
@@ -478,7 +468,7 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 	}
 }
 
-// Properly closes gRPC connection and stops log parser.
+// Closes the gRPC connection, GeoIP readers, and log parser.
 func (e *Exporter) Close() error {
 	if e.logParser != nil {
 		e.logParser.Stop()

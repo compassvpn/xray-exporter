@@ -1,9 +1,5 @@
 //go:build windows
 
-// Cross-platform file tracking functionality.
-// This Windows implementation uses the NTFS file index (a stable per-file id,
-// the closest equivalent to a Unix inode) so that appending to a log file is
-// NOT mistaken for a rotation. ModTime is only used as a last-resort fallback.
 package logparser
 
 import (
@@ -12,10 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Returns a stable file identifier for Windows systems.
-// It reads the NTFS file index via GetFileInformationByHandle, which (unlike
-// ModTime) does not change when the file is appended to, so an actively-written
-// log is not repeatedly re-read from the start.
+// Returns a stable per-file id (the closest Windows equivalent to a Unix
+// inode), used to detect log rotation. It reads the NTFS file index via
+// GetFileInformationByHandle, which (unlike ModTime) does not change on
+// append, so an actively-written log is not repeatedly re-read from the start.
 func getInode(file *os.File, fileInfo os.FileInfo) uint64 {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err == nil {
