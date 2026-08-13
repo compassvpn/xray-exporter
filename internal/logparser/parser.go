@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"maps"
 	"net"
 	"os"
 	"regexp"
@@ -60,6 +61,15 @@ type MetricsData struct {
 	CountryCounts  map[string]*windowedCount
 	CityCounts     map[string]*windowedCount // key format: city|country.
 
+	// Cumulative per-key totals. Nothing expires these, so they only ever rise
+	// and can be exported as counters. A restart puts them back to zero, which
+	// is just a normal counter reset.
+	DomainTotals  map[string]int64
+	IPTotals      map[string]int64
+	ASNTotals     map[string]int64
+	CountryTotals map[string]int64
+	CityTotals    map[string]int64
+
 	// Circular buffer for connection timestamps to limit memory usage.
 	// The backing slice grows lazily up to ConnectionsBufCap so low-traffic
 	// servers don't pay the full allocation upfront.
@@ -68,9 +78,9 @@ type MetricsData struct {
 	ConnectionsBufSize   int // number of in-window entries currently held.
 	ConnectionsBufCap    int // maximum buffer capacity.
 
-	LastPos   int64  // last position read in log file.
-	LastInode uint64 // last inode of log file, for rotation detection.
-	mu        sync.RWMutex
+	LastPos  int64        // last position read in the log file.
+	LastFile fileIdentity // identity of that file, for rotation detection.
+	mu       sync.RWMutex
 }
 
 // Handles log file monitoring and metrics collection.
@@ -261,6 +271,50 @@ func expireCounts(m map[string]*windowedCount, cutoff time.Time) {
 	}
 }
 
+// Memory backstop for the cumulative totals, same idea as SafetyMaxKeys on the
+// windowed counts. Nothing here expires by time.
+func (p *Parser) capTotals() {
+	p.metrics.mu.Lock()
+	defer p.metrics.mu.Unlock()
+
+	capCumulative(p.metrics.DomainTotals, p.metrics.DomainCounts)
+	capCumulative(p.metrics.IPTotals, p.metrics.IPCounts)
+	capCumulative(p.metrics.ASNTotals, p.metrics.ASNCounts)
+	capCumulative(p.metrics.CountryTotals, p.metrics.CountryCounts)
+	capCumulative(p.metrics.CityTotals, p.metrics.CityCounts)
+}
+
+// Trims totals down to SafetyMaxKeys, lowest totals first. Keys still in the
+// windowed map are kept whatever their total, since those are the ones that can
+// be exported and dropping one would make it come back from zero. Everything
+// else is nowhere near the exported top-N anyway.
+func capCumulative(totals map[string]int64, active map[string]*windowedCount) {
+	if len(totals) <= SafetyMaxKeys {
+		return
+	}
+
+	evictable := make([]countEntry, 0, len(totals))
+	for k, v := range totals {
+		if _, ok := active[k]; !ok {
+			evictable = append(evictable, countEntry{key: k, count: v})
+		}
+	}
+	slices.SortFunc(evictable, func(a, b countEntry) int {
+		return cmp.Compare(b.count, a.count)
+	})
+
+	keep := max(0, SafetyMaxKeys-(len(totals)-len(evictable)))
+	if keep >= len(evictable) {
+		return
+	}
+
+	dropped := evictable[keep:]
+	logrus.Debugf("cumulative key cap hit: dropped %d low-total keys", len(dropped))
+	for _, e := range dropped {
+		delete(totals, e.key)
+	}
+}
+
 // Drops user activity that has aged out of the time window: expired unique IPs
 // and connection timestamps at the tail of the circular buffer. Runs on the
 // parse loop so memory is reclaimed regardless of scrape traffic.
@@ -346,6 +400,11 @@ func NewParser(config Config) (*Parser, error) {
 			ASNCounts:            make(map[string]*windowedCount),
 			CountryCounts:        make(map[string]*windowedCount),
 			CityCounts:           make(map[string]*windowedCount),
+			DomainTotals:         make(map[string]int64),
+			IPTotals:             make(map[string]int64),
+			ASNTotals:            make(map[string]int64),
+			CountryTotals:        make(map[string]int64),
+			CityTotals:           make(map[string]int64),
 			ConnectionTimestamps: make([]time.Time, 0, initialCap),
 			ConnectionsBufHead:   0,
 			ConnectionsBufSize:   0,
@@ -450,6 +509,46 @@ func (p *Parser) GetCityCounts() map[string]int64 {
 	return snapshotCounts(p.metrics.CityCounts)
 }
 
+// Returns a copy of the cumulative domain request totals.
+func (p *Parser) GetDomainTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.DomainTotals)
+}
+
+// Returns a copy of the cumulative direct IP request totals.
+func (p *Parser) GetIPTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.IPTotals)
+}
+
+// Returns a copy of the cumulative ASN request totals.
+func (p *Parser) GetASNTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.ASNTotals)
+}
+
+// Returns a copy of the cumulative country request totals.
+func (p *Parser) GetCountryTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.CountryTotals)
+}
+
+// Returns a copy of the cumulative city request totals.
+func (p *Parser) GetCityTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.CityTotals)
+}
+
 // Returns a plain key->count copy, dropping the last-seen bookkeeping so
 // callers (the exporter) keep working with map[string]int64.
 func snapshotCounts(m map[string]*windowedCount) map[string]int64 {
@@ -488,12 +587,14 @@ func (p *Parser) parseLoop() {
 			cutoff := time.Now().Add(-p.timeWindow)
 			p.expireWindowed(cutoff)
 			p.expireStaleCounts(cutoff)
+			p.capTotals()
 		}
 	}
 }
 
 // Reads and processes new entries from the log file since the last position.
-// Handles log rotation by detecting inode changes and supports file truncation.
+// Rotation and truncation are spotted from the file's identity (see fileIdentity)
+// so a replaced file is read from the start and an existing one is never read twice.
 func (p *Parser) parseLogFile() error {
 	file, err := os.Open(p.logPath)
 	if err != nil {
@@ -507,19 +608,27 @@ func (p *Parser) parseLogFile() error {
 	}
 
 	p.mu.Lock()
-	currentInode := getInode(file, stat)
+	current := identifyFile(file, stat)
 
 	switch {
-	case p.metrics.LastInode == 0:
+	case !p.metrics.LastFile.known:
 		// First run: adopt the current file identity, keep position (0).
-		p.metrics.LastInode = currentInode
-	case currentInode != p.metrics.LastInode:
-		logrus.Debug("Log file rotated, resetting position")
+		p.metrics.LastFile = current
+	case !current.sameFileAs(p.metrics.LastFile):
+		// Rotation swapped the file out. The totals aren't touched, so they
+		// don't dip here.
+		logrus.Debug("Log file rotated, reading the new file from the start")
 		p.metrics.LastPos = 0
-		p.metrics.LastInode = currentInode
+		p.metrics.LastFile = current
 	case p.metrics.LastPos > stat.Size():
-		logrus.Debug("Log file truncated, resetting position")
+		// Same file but shorter than what we already read, so it was truncated
+		// in place and holds content we haven't seen.
+		logrus.Debug("Log file truncated, reading from the start")
 		p.metrics.LastPos = 0
+		p.metrics.LastFile = current
+	case !p.metrics.LastFile.hasPrint && current.hasPrint:
+		// Long enough to hash now, so save the hash for later inode reuse.
+		p.metrics.LastFile = current
 	}
 
 	startPos := p.metrics.LastPos
@@ -651,11 +760,25 @@ func (p *Parser) mergeDelta(d *metricsDelta) {
 	mergeCounts(p.metrics.ASNCounts, d.asnCounts)
 	mergeCounts(p.metrics.CountryCounts, d.countryCounts)
 	mergeCounts(p.metrics.CityCounts, d.cityCounts)
+
+	addTotals(p.metrics.DomainTotals, d.domainCounts)
+	addTotals(p.metrics.IPTotals, d.ipCounts)
+	addTotals(p.metrics.ASNTotals, d.asnCounts)
+	addTotals(p.metrics.CountryTotals, d.countryCounts)
+	addTotals(p.metrics.CityTotals, d.cityCounts)
+
 	for ip, ts := range d.uniqueIPs {
 		p.metrics.UniqueIPs[ip] = ts
 	}
 	for _, ts := range d.timestamps {
 		p.addConnectionTimestamp(ts)
+	}
+}
+
+// Folds a batch into the cumulative totals. Only ever adds.
+func addTotals(dst map[string]int64, src map[string]*windowedCount) {
+	for k, v := range src {
+		dst[k] += v.count
 	}
 }
 

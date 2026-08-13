@@ -88,29 +88,49 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		"memstats_pause_total_ns":    {txt: "Cumulative nanoseconds in GC stop-the-world pauses"},
 
 		// User activity metrics from log parsing.
-		// The per-target counts below are gauges: keys are expired out of the time
-		// window and only the top-N are exported each scrape, so the value is not
-		// monotonic and must not carry a _total suffix.
 		"unique_users":      {txt: "Number of unique users in time window"},
 		"total_connections": {txt: "Total number of connections in time window"},
-		"requested_domain_ip": {
-			txt:  "Number of requests per domain or IP (top-N in time window)",
-			lbls: []string{"target"},
-		},
 		"outbound_requests": {
 			txt:  "Number of requests per outbound (top-N in time window)",
 			lbls: []string{"outbound"},
 		},
+
+		// Cumulative per-target counters. They only ever rise, apart from a
+		// restart, which is a normal counter reset.
+		"requested_domain_ip_total": {
+			txt:  "Requests per domain or IP since startup (top-N by activity in the time window)",
+			lbls: []string{"target"},
+		},
+		"asns_total": {
+			txt:  "Requests per ASN since startup (top-N by activity in the time window)",
+			lbls: []string{"asn", "org"},
+		},
+		"countries_total": {
+			txt:  "Requests per country since startup (top-N by activity in the time window)",
+			lbls: []string{"country"},
+		},
+		"cities_total": {
+			txt:  "Requests per city since startup (top-N by activity in the time window)",
+			lbls: []string{"city", "country"},
+		},
+
+		// Replaced by the _total counters above, kept for one release so
+		// dashboards can catch up. These drop back to zero when a key ages out of
+		// the time window, so rate() and increase() over them are meaningless.
+		"requested_domain_ip": {
+			txt:  "DEPRECATED, use xray_requested_domain_ip_total. Number of requests per domain or IP (top-N in time window)",
+			lbls: []string{"target"},
+		},
 		"asns": {
-			txt:  "Number of requests per ASN (top-N in time window)",
+			txt:  "DEPRECATED, use xray_asns_total. Number of requests per ASN (top-N in time window)",
 			lbls: []string{"asn", "org"},
 		},
 		"countries": {
-			txt:  "Number of requests per country (top-N in time window)",
+			txt:  "DEPRECATED, use xray_countries_total. Number of requests per country (top-N in time window)",
 			lbls: []string{"country"},
 		},
 		"cities": {
-			txt:  "Number of requests per city (top-N in time window)",
+			txt:  "DEPRECATED, use xray_cities_total. Number of requests per city (top-N in time window)",
 			lbls: []string{"city", "country"},
 		},
 	} {
@@ -394,17 +414,40 @@ func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	metricDesc := e.metricDescriptions["requested_domain_ip"]
+	// Still top-N by activity in the time window, so panels keep showing what is
+	// busy now. Only the value changed. A key that falls out of the top-N leaves
+	// a gap and comes back higher, never lower.
+	e.collectCumulative(ch, "requested_domain_ip_total", "requested_domain_ip",
+		e.logParser.GetDomainCounts(), e.logParser.GetDomainTotals(), logparser.MaxTrackedDomains, singleLabel)
+	e.collectCumulative(ch, "requested_domain_ip_total", "requested_domain_ip",
+		e.logParser.GetIPCounts(), e.logParser.GetIPTotals(), logparser.MaxTrackedIPs, singleLabel)
+}
 
-	// Only export the top domains and IPs to prevent cardinality leak.
-	// These are gauges: the backing keys are expired out of the time window, so
-	// the value is not monotonic and must not be treated as a counter.
-	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
+// Exports the top-N busiest keys of one log metric twice: the cumulative total
+// as a counter, and the in-window count under the deprecated gauge name.
+// labelsFor turns a map key into label values.
+func (e *Exporter) collectCumulative(ch chan<- prometheus.Metric, counterName, gaugeName string, counts, totals map[string]int64, n int, labelsFor func(string) []string) {
+	for _, entry := range topN(counts, n) {
+		labels := labelsFor(entry.key)
+
+		// No total means the key cap evicted it. Skip it instead of reporting
+		// zero, which would look like a reset.
+		if total, ok := totals[entry.key]; ok {
+			e.registerConstMetricCounter(ch, counterName, float64(total), labels...)
+		}
+		e.registerConstMetricGauge(ch, gaugeName, float64(entry.count), labels...)
 	}
-	for _, entry := range topN(e.logParser.GetIPCounts(), logparser.MaxTrackedIPs) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
-	}
+}
+
+func singleLabel(key string) []string {
+	return []string{key}
+}
+
+// Splits a "first|second" key (asn|org, city|country) into two label values.
+// A key without a separator gets an empty second value.
+func splitPairLabel(key string) []string {
+	first, second, _ := strings.Cut(key, "|")
+	return []string{first, second}
 }
 
 // Collects outbound routing statistics from log parser.
@@ -415,7 +458,8 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 
 	metricDesc := e.metricDescriptions["outbound_requests"]
 
-	// Top-N only, to bound cardinality (gauge, see note in collectDomainMetrics).
+	// Top-N only, to bound cardinality. Still a gauge: its keys age out of the
+	// time window, so the value goes down as well as up.
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
 		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
@@ -427,16 +471,9 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for _, entry := range topN(e.logParser.GetASNCounts(), logparser.MaxTrackedASNs) {
-		// Key format: asn|org.
-		parts := strings.Split(entry.key, "|")
-		asn := parts[0]
-		org := ""
-		if len(parts) > 1 {
-			org = parts[1]
-		}
-		e.registerConstMetricGauge(ch, "asns", float64(entry.count), asn, org)
-	}
+	// Key format: asn|org.
+	e.collectCumulative(ch, "asns_total", "asns",
+		e.logParser.GetASNCounts(), e.logParser.GetASNTotals(), logparser.MaxTrackedASNs, splitPairLabel)
 }
 
 // Collects country statistics from log parser.
@@ -445,9 +482,8 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
-		e.registerConstMetricGauge(ch, "countries", float64(entry.count), entry.key)
-	}
+	e.collectCumulative(ch, "countries_total", "countries",
+		e.logParser.GetCountryCounts(), e.logParser.GetCountryTotals(), logparser.MaxTrackedCountries, singleLabel)
 }
 
 // Collects city statistics from log parser.
@@ -456,16 +492,9 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for _, entry := range topN(e.logParser.GetCityCounts(), logparser.MaxTrackedCities) {
-		// Key format: city|country.
-		parts := strings.Split(entry.key, "|")
-		city := parts[0]
-		country := ""
-		if len(parts) > 1 {
-			country = parts[1]
-		}
-		e.registerConstMetricGauge(ch, "cities", float64(entry.count), city, country)
-	}
+	// Key format: city|country.
+	e.collectCumulative(ch, "cities_total", "cities",
+		e.logParser.GetCityCounts(), e.logParser.GetCityTotals(), logparser.MaxTrackedCities, splitPairLabel)
 }
 
 // Closes the gRPC connection, GeoIP readers, and log parser.

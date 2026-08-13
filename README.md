@@ -284,15 +284,30 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 
 | Metric | Description | Labels |
 | :----- | :---------- | :----- |
+| `xray_requested_domain_ip_total` | Requests per domain or IP address, counted since startup | `target` |
+| `xray_asns_total` | Requests per ASN, counted since startup | `asn`, `org` |
+| `xray_countries_total` | Requests per country, counted since startup | `country` |
+| `xray_cities_total` | Requests per city, counted since startup | `city`, `country` |
 | `xray_unique_users` | Number of unique users active in the time window | - |
 | `xray_total_connections` | Total number of connections in the time window | - |
-| `xray_requested_domain_ip` | Requests per domain or IP address (top-N in time window) | `target` |
 | `xray_outbound_requests` | Requests per outbound connection (top-N in time window) | `outbound` |
-| `xray_asns` | Requests per ASN (top-N in time window) | `asn`, `org` |
-| `xray_countries` | Requests per country (top-N in time window) | `country` |
-| `xray_cities` | Requests per city (top-N in time window) | `city`, `country` |
 
-> These are gauges, not counters. They hold current top-N request counts in the time window and are trimmed each scrape, so the value is not monotonic. Do not apply `rate()`/`increase()`.
+The `_total` metrics are counters, so use them with `rate()` and `increase()`. They only go up. Rotating the log, truncating it, or a quiet spell long enough for the time window to age out all leave them alone. Only restarting the exporter puts them back to zero, and that is a normal counter reset.
+
+Which targets get exported is still based on how busy they are in the time window. A target that goes quiet drops out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one.
+
+The other three are gauges describing the current time window, so don't use `rate()` or `increase()` on them.
+
+#### Deprecated
+
+| Metric | Replacement |
+| :----- | :---------- |
+| `xray_requested_domain_ip` | `xray_requested_domain_ip_total` |
+| `xray_asns` | `xray_asns_total` |
+| `xray_countries` | `xray_countries_total` |
+| `xray_cities` | `xray_cities_total` |
+
+These four are still exported, but they will be removed in the release after next. They are gauges holding the top-N counts inside the time window, and they drop back to zero every time a key ages out, so `rate()` and `increase()` over them report big jumps that never happened. Point your dashboards at the `_total` counters instead.
 
 ### Core Metrics
 
@@ -304,13 +319,12 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 
 ### Recommended Grafana Queries
 
-Use these queries to visualize the new GeoIP metrics:
+These are counters, so wrap them in `increase()` over the panel's range to get the requests that happened in that range:
 
-These series are gauges (top-N request counts since the parser started, periodically trimmed), so query the value directly rather than with `rate()`/`increase()`:
-
-- **Top 10 ASNs**: `topk(10, sum by (asn, org) (xray_asns))`
-- **Top 10 Countries**: `topk(10, sum by (country) (xray_countries))`
-- **Top 10 Cities**: `topk(10, sum by (city, country) (xray_cities))`
+- **Top 10 ASNs**: `topk(10, sum by (asn, org) (increase(xray_asns_total[$__range])))`
+- **Top 10 Countries**: `topk(10, sum by (country) (increase(xray_countries_total[$__range])))`
+- **Top 10 Cities**: `topk(10, sum by (city, country) (increase(xray_cities_total[$__range])))`
+- **Top 10 Domains/IPs**: `topk(10, sum by (target) (increase(xray_requested_domain_ip_total[$__range])))`
 
 ## Performance & Scalability
 

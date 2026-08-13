@@ -8,16 +8,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Returns a stable per-file id (the closest Windows equivalent to a Unix
-// inode), used to detect log rotation. It reads the NTFS file index via
-// GetFileInformationByHandle, which (unlike ModTime) does not change on
-// append, so an actively-written log is not repeatedly re-read from the start.
-func getInode(file *os.File, fileInfo os.FileInfo) uint64 {
+// Returns the volume serial number and NTFS file index, the closest Windows
+// equivalents of device and inode. The file index, unlike ModTime, doesn't change
+// on append, so a log being written to isn't re-read from the start every pass.
+func getFileID(file *os.File, fileInfo os.FileInfo) (dev, ino uint64) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err == nil {
-		return uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
+		return uint64(info.VolumeSerialNumber), uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
 	}
 	// Fallback for filesystems without a stable file index (e.g. some FAT/network
 	// shares): use ModTime. This may over-detect rotation but never under-detects.
-	return uint64(fileInfo.ModTime().UnixNano())
+	return 0, uint64(fileInfo.ModTime().UnixNano())
 }
