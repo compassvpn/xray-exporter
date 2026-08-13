@@ -22,9 +22,9 @@ import (
 
 // Cardinality limits: only the top-N keys per metric are exported.
 const (
-	MaxTrackedDomains   = 20
-	MaxTrackedIPs       = 20
-	MaxTrackedOutbounds = 10
+	MaxTrackedDomains   = 50
+	MaxTrackedIPs       = 50
+	MaxTrackedOutbounds = 50
 	MaxTrackedASNs      = 20
 	MaxTrackedCountries = 20
 	MaxTrackedCities    = 20
