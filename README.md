@@ -294,7 +294,7 @@ To learn more about Prometheus, please visit the [official docs](https://prometh
 
 The `_total` metrics are counters, so use them with `rate()` and `increase()`. They only go up. Rotating the log, truncating it, or a quiet spell long enough for the time window to age out all leave them alone. Only restarting the exporter puts them back to zero, and that is a normal counter reset.
 
-Which targets get exported is still based on how busy they are in the time window. A target that goes quiet drops out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one.
+Which targets get exported is based on how busy they are in the time window. A target that goes quiet drops out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one.
 
 The other three are gauges describing the current time window, so don't use `rate()` or `increase()` on them.
 
