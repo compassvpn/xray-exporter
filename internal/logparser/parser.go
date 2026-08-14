@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
@@ -78,9 +79,9 @@ type MetricsData struct {
 	ConnectionsBufSize   int // number of in-window entries currently held.
 	ConnectionsBufCap    int // maximum buffer capacity.
 
-	LastPos  int64        // last position read in the log file.
-	LastFile fileIdentity // identity of that file, for rotation detection.
-	mu       sync.RWMutex
+	LastPos   int64  // last position read in log file.
+	LastInode uint64 // last inode of log file, for rotation detection.
+	mu        sync.RWMutex
 }
 
 // Handles log file monitoring and metrics collection.
@@ -277,40 +278,28 @@ func (p *Parser) capTotals() {
 	p.metrics.mu.Lock()
 	defer p.metrics.mu.Unlock()
 
-	capCumulative(p.metrics.DomainTotals, p.metrics.DomainCounts)
-	capCumulative(p.metrics.IPTotals, p.metrics.IPCounts)
-	capCumulative(p.metrics.ASNTotals, p.metrics.ASNCounts)
-	capCumulative(p.metrics.CountryTotals, p.metrics.CountryCounts)
-	capCumulative(p.metrics.CityTotals, p.metrics.CityCounts)
+	capCumulative(p.metrics.DomainTotals)
+	capCumulative(p.metrics.IPTotals)
+	capCumulative(p.metrics.ASNTotals)
+	capCumulative(p.metrics.CountryTotals)
+	capCumulative(p.metrics.CityTotals)
 }
 
-// Trims totals down to SafetyMaxKeys, lowest totals first. Keys still in the
-// windowed map are kept whatever their total, since those are the ones that can
-// be exported and dropping one would make it come back from zero. Everything
-// else is nowhere near the exported top-N anyway.
-func capCumulative(totals map[string]int64, active map[string]*windowedCount) {
+// Trims totals down to SafetyMaxKeys, dropping the lowest ones. A dropped key
+// that comes back starts from zero, which increase() reads as a plain reset.
+func capCumulative(totals map[string]int64) {
 	if len(totals) <= SafetyMaxKeys {
 		return
 	}
 
-	evictable := make([]countEntry, 0, len(totals))
+	entries := make([]countEntry, 0, len(totals))
 	for k, v := range totals {
-		if _, ok := active[k]; !ok {
-			evictable = append(evictable, countEntry{key: k, count: v})
-		}
+		entries = append(entries, countEntry{key: k, count: v})
 	}
-	slices.SortFunc(evictable, func(a, b countEntry) int {
+	slices.SortFunc(entries, func(a, b countEntry) int {
 		return cmp.Compare(b.count, a.count)
 	})
-
-	keep := max(0, SafetyMaxKeys-(len(totals)-len(evictable)))
-	if keep >= len(evictable) {
-		return
-	}
-
-	dropped := evictable[keep:]
-	logrus.Debugf("cumulative key cap hit: dropped %d low-total keys", len(dropped))
-	for _, e := range dropped {
+	for _, e := range entries[SafetyMaxKeys:] {
 		delete(totals, e.key)
 	}
 }
@@ -592,9 +581,14 @@ func (p *Parser) parseLoop() {
 	}
 }
 
+// Returns the file's inode, used to detect log rotation. Unix-only, like the
+// rest of this exporter's deployments.
+func getInode(fileInfo os.FileInfo) uint64 {
+	return uint64(fileInfo.Sys().(*syscall.Stat_t).Ino)
+}
+
 // Reads and processes new entries from the log file since the last position.
-// Rotation and truncation are spotted from the file's identity (see fileIdentity)
-// so a replaced file is read from the start and an existing one is never read twice.
+// Handles log rotation by detecting inode changes and supports file truncation.
 func (p *Parser) parseLogFile() error {
 	file, err := os.Open(p.logPath)
 	if err != nil {
@@ -608,27 +602,21 @@ func (p *Parser) parseLogFile() error {
 	}
 
 	p.mu.Lock()
-	current := identifyFile(file, stat)
+	currentInode := getInode(stat)
 
 	switch {
-	case !p.metrics.LastFile.known:
+	case p.metrics.LastInode == 0:
 		// First run: adopt the current file identity, keep position (0).
-		p.metrics.LastFile = current
-	case !current.sameFileAs(p.metrics.LastFile):
+		p.metrics.LastInode = currentInode
+	case currentInode != p.metrics.LastInode:
 		// Rotation swapped the file out. The totals aren't touched, so they
 		// don't dip here.
-		logrus.Debug("Log file rotated, reading the new file from the start")
+		logrus.Debug("Log file rotated, resetting position")
 		p.metrics.LastPos = 0
-		p.metrics.LastFile = current
+		p.metrics.LastInode = currentInode
 	case p.metrics.LastPos > stat.Size():
-		// Same file but shorter than what we already read, so it was truncated
-		// in place and holds content we haven't seen.
-		logrus.Debug("Log file truncated, reading from the start")
+		logrus.Debug("Log file truncated, resetting position")
 		p.metrics.LastPos = 0
-		p.metrics.LastFile = current
-	case !p.metrics.LastFile.hasPrint && current.hasPrint:
-		// Long enough to hash now, so save the hash for later inode reuse.
-		p.metrics.LastFile = current
 	}
 
 	startPos := p.metrics.LastPos

@@ -12,7 +12,7 @@ An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and expo
 - **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
 - **High Performance**: Optimized log parsing with circular buffers and LRU caching
 - **Adaptive buffers**: Connection buffer sized by the time window and grown lazily as traffic arrives
-- **Cross-platform**: Supports Linux, macOS, Windows with proper log rotation detection
+- **Linux and macOS**: with proper log rotation detection (no Windows support)
 
 ## Quick Start
 
@@ -298,16 +298,7 @@ Which targets get exported is still based on how busy they are in the time windo
 
 The other three are gauges describing the current time window, so don't use `rate()` or `increase()` on them.
 
-#### Deprecated
-
-| Metric | Replacement |
-| :----- | :---------- |
-| `xray_requested_domain_ip` | `xray_requested_domain_ip_total` |
-| `xray_asns` | `xray_asns_total` |
-| `xray_countries` | `xray_countries_total` |
-| `xray_cities` | `xray_cities_total` |
-
-These four are still exported, but they will be removed in the release after next. They are gauges holding the top-N counts inside the time window, and they drop back to zero every time a key ages out, so `rate()` and `increase()` over them report big jumps that never happened. Point your dashboards at the `_total` counters instead.
+The old gauge names (`xray_requested_domain_ip`, `xray_asns`, `xray_countries`, `xray_cities`) are gone. Update dashboards to the `_total` names when deploying this version.
 
 ### Core Metrics
 

@@ -113,26 +113,6 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 			txt:  "Requests per city since startup (top-N by activity in the time window)",
 			lbls: []string{"city", "country"},
 		},
-
-		// Replaced by the _total counters above, kept for one release so
-		// dashboards can catch up. These drop back to zero when a key ages out of
-		// the time window, so rate() and increase() over them are meaningless.
-		"requested_domain_ip": {
-			txt:  "DEPRECATED, use xray_requested_domain_ip_total. Number of requests per domain or IP (top-N in time window)",
-			lbls: []string{"target"},
-		},
-		"asns": {
-			txt:  "DEPRECATED, use xray_asns_total. Number of requests per ASN (top-N in time window)",
-			lbls: []string{"asn", "org"},
-		},
-		"countries": {
-			txt:  "DEPRECATED, use xray_countries_total. Number of requests per country (top-N in time window)",
-			lbls: []string{"country"},
-		},
-		"cities": {
-			txt:  "DEPRECATED, use xray_cities_total. Number of requests per city (top-N in time window)",
-			lbls: []string{"city", "country"},
-		},
 	} {
 		e.metricDescriptions[k] = e.newMetricDescr(k, desc.txt, desc.lbls)
 	}
@@ -409,45 +389,23 @@ func (e *Exporter) collectLogMetrics(ch chan<- prometheus.Metric) {
 }
 
 // Collects domain and IP request statistics from log parser.
+// Keys are picked by activity in the time window, so panels show what is busy
+// now, but the exported value is the cumulative total so it never goes down.
+// A key that falls out of the top-N leaves a gap and comes back higher.
 func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 	if e.logParser == nil {
 		return
 	}
 
-	// Still top-N by activity in the time window, so panels keep showing what is
-	// busy now. Only the value changed. A key that falls out of the top-N leaves
-	// a gap and comes back higher, never lower.
-	e.collectCumulative(ch, "requested_domain_ip_total", "requested_domain_ip",
-		e.logParser.GetDomainCounts(), e.logParser.GetDomainTotals(), logparser.MaxTrackedDomains, singleLabel)
-	e.collectCumulative(ch, "requested_domain_ip_total", "requested_domain_ip",
-		e.logParser.GetIPCounts(), e.logParser.GetIPTotals(), logparser.MaxTrackedIPs, singleLabel)
-}
-
-// Exports the top-N busiest keys of one log metric twice: the cumulative total
-// as a counter, and the in-window count under the deprecated gauge name.
-// labelsFor turns a map key into label values.
-func (e *Exporter) collectCumulative(ch chan<- prometheus.Metric, counterName, gaugeName string, counts, totals map[string]int64, n int, labelsFor func(string) []string) {
-	for _, entry := range topN(counts, n) {
-		labels := labelsFor(entry.key)
-
-		// No total means the key cap evicted it. Skip it instead of reporting
-		// zero, which would look like a reset.
-		if total, ok := totals[entry.key]; ok {
-			e.registerConstMetricCounter(ch, counterName, float64(total), labels...)
-		}
-		e.registerConstMetricGauge(ch, gaugeName, float64(entry.count), labels...)
+	totals := e.logParser.GetDomainTotals()
+	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
+		e.registerConstMetricCounter(ch, "requested_domain_ip_total", float64(totals[entry.key]), entry.key)
 	}
-}
 
-func singleLabel(key string) []string {
-	return []string{key}
-}
-
-// Splits a "first|second" key (asn|org, city|country) into two label values.
-// A key without a separator gets an empty second value.
-func splitPairLabel(key string) []string {
-	first, second, _ := strings.Cut(key, "|")
-	return []string{first, second}
+	ipTotals := e.logParser.GetIPTotals()
+	for _, entry := range topN(e.logParser.GetIPCounts(), logparser.MaxTrackedIPs) {
+		e.registerConstMetricCounter(ch, "requested_domain_ip_total", float64(ipTotals[entry.key]), entry.key)
+	}
 }
 
 // Collects outbound routing statistics from log parser.
@@ -471,9 +429,12 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	// Key format: asn|org.
-	e.collectCumulative(ch, "asns_total", "asns",
-		e.logParser.GetASNCounts(), e.logParser.GetASNTotals(), logparser.MaxTrackedASNs, splitPairLabel)
+	totals := e.logParser.GetASNTotals()
+	for _, entry := range topN(e.logParser.GetASNCounts(), logparser.MaxTrackedASNs) {
+		// Key format: asn|org.
+		asn, org, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricCounter(ch, "asns_total", float64(totals[entry.key]), asn, org)
+	}
 }
 
 // Collects country statistics from log parser.
@@ -482,8 +443,10 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	e.collectCumulative(ch, "countries_total", "countries",
-		e.logParser.GetCountryCounts(), e.logParser.GetCountryTotals(), logparser.MaxTrackedCountries, singleLabel)
+	totals := e.logParser.GetCountryTotals()
+	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
+		e.registerConstMetricCounter(ch, "countries_total", float64(totals[entry.key]), entry.key)
+	}
 }
 
 // Collects city statistics from log parser.
@@ -492,9 +455,12 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	// Key format: city|country.
-	e.collectCumulative(ch, "cities_total", "cities",
-		e.logParser.GetCityCounts(), e.logParser.GetCityTotals(), logparser.MaxTrackedCities, splitPairLabel)
+	totals := e.logParser.GetCityTotals()
+	for _, entry := range topN(e.logParser.GetCityCounts(), logparser.MaxTrackedCities) {
+		// Key format: city|country.
+		city, country, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricCounter(ch, "cities_total", float64(totals[entry.key]), city, country)
+	}
 }
 
 // Closes the gRPC connection, GeoIP readers, and log parser.
