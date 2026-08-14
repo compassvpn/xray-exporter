@@ -12,7 +12,7 @@ An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and expo
 - **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
 - **High Performance**: Optimized log parsing with circular buffers and LRU caching
 - **Adaptive buffers**: Connection buffer sized by the time window and grown lazily as traffic arrives
-- **Linux and macOS**: with proper log rotation detection (no Windows support)
+- **Linux and macOS**: with proper log rotation detection
 
 ## Quick Start
 
@@ -297,8 +297,6 @@ The `_total` metrics are counters, so use them with `rate()` and `increase()`. T
 Which targets get exported is still based on how busy they are in the time window. A target that goes quiet drops out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one.
 
 The other three are gauges describing the current time window, so don't use `rate()` or `increase()` on them.
-
-The old gauge names (`xray_requested_domain_ip`, `xray_asns`, `xray_countries`, `xray_cities`) are gone. Update dashboards to the `_total` names when deploying this version.
 
 ### Core Metrics
 
