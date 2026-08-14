@@ -327,29 +327,6 @@ func (p *Parser) expireWindowed(cutoff time.Time) {
 	}
 }
 
-// Keeps only the top n entries by count from a map.
-func keepTopN(counts map[string]int64, n int) map[string]int64 {
-	if len(counts) <= n {
-		return counts
-	}
-
-	entries := make([]countEntry, 0, len(counts))
-	for key, count := range counts {
-		entries = append(entries, countEntry{key: key, count: count})
-	}
-
-	slices.SortFunc(entries, func(a, b countEntry) int {
-		return cmp.Compare(b.count, a.count)
-	})
-
-	result := make(map[string]int64, n)
-	for _, entry := range entries[:n] {
-		result[entry.key] = entry.count
-	}
-
-	return result
-}
-
 // Creates a new log parser with automatic buffer sizing based on time window.
 func NewParser(config Config) (*Parser, error) {
 	ctx, cancel := context.WithCancel(context.Background())
