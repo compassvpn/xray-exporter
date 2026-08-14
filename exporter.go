@@ -416,7 +416,7 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 
 	metricDesc := e.metricDescriptions["outbound_requests"]
 
-	// Top-N only, to bound cardinality. Still a gauge: its keys age out of the
+	// Top-N only, to bound cardinality. A gauge: its keys age out of the
 	// time window, so the value goes down as well as up.
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
 		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
