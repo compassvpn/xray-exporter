@@ -2,15 +2,37 @@
 
 A Prometheus exporter for Xray and V2Ray. It reads runtime and traffic statistics from Xray's gRPC Stats API, and optionally parses the access log to report who is connecting, from where, and to which destinations.
 
-Log parsing is where most of the interesting data comes from: unique users, connection counts, top domains and direct IPs, outbound routing, and a GeoIP breakdown by ASN, country, and city. The GeoLite2 databases are downloaded on startup, so there is nothing to set up by hand.
-
 Rotation is detected by inode, so log parsing is unix only. Linux and macOS builds are published.
+
+## What you can put on a dashboard
+
+From the access log:
+
+- Unique users and open connections over a rolling window
+- Top requested domains, with subdomains folded into their registrable domain
+- Top direct IP destinations, with localhost, private ranges, and the usual public DNS resolvers filtered out
+- Top ASNs with their network name, top countries, and top cities, resolved from GeoLite2 databases the exporter downloads and refreshes on its own
+- A world map of connections by country or city
+- How traffic splits across your outbounds, including whichever tag your config uses for blocked traffic
+
+From the Stats API:
+
+- Bytes up and down per inbound and per outbound
+- Bytes up and down per user, off by default because it is one series per user
+- Xray process health: uptime, goroutine count, heap usage, and GC pauses
+- Whether the last scrape worked and how long it took
+
+Our CompassVPN dashboard is published on [grafana.com](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/) if you want a starting point. The [metrics reference](#metrics-reference) below has the queries if you would rather build your own.
 
 ## Install
 
-Binaries for Linux (amd64, arm64, arm) and macOS (amd64, arm64) are on the [releases page](https://github.com/compassvpn/xray-exporter/releases/latest).
+### Binaries
 
-Multi-arch Docker images (amd64, arm64, arm/v7) are published to the [GitHub Container Registry](https://github.com/compassvpn/xray-exporter/pkgs/container/xray-exporter):
+Linux (amd64, arm64, arm) and macOS (amd64, arm64) builds are on the [releases page](https://github.com/compassvpn/xray-exporter/releases/latest).
+
+### Docker
+
+Multi-arch images (amd64, arm64, arm/v7) are published to the [GitHub Container Registry](https://github.com/compassvpn/xray-exporter/pkgs/container/xray-exporter):
 
 ```bash
 docker run --rm -it ghcr.io/compassvpn/xray-exporter:latest
@@ -18,7 +40,9 @@ docker run --rm -it ghcr.io/compassvpn/xray-exporter:latest
 
 Three kinds of tag are available: `latest` follows the newest release, a version tag like `v0.6.6` pins to one release, and `main` is built from the tip of the main branch and may not be stable.
 
-## Configure Xray
+## Setup
+
+### Xray config
 
 The exporter talks to Xray's Stats API, so the `api`, `stats`, and `policy` blocks all need to be present, along with a routing rule that sends the API inbound to the API outbound:
 
@@ -96,7 +120,7 @@ See the [xray-core API docs](https://xtls.github.io/config/api.html) and [stats 
 
 ### Access log
 
-Everything under [user activity](#user-activity-from-the-access-log) below comes from the access log, which is off unless you turn it on:
+Everything under [user activity](#user-activity) below comes from the access log, which is off unless you turn it on:
 
 ```json
 {
@@ -108,7 +132,9 @@ Everything under [user activity](#user-activity-from-the-access-log) below comes
 }
 ```
 
-## Run it
+## Running it
+
+### Starting the exporter
 
 ```bash
 # gRPC metrics only
@@ -145,7 +171,7 @@ time="2025-01-15T10:30:45Z" level=info msg="Server starting on :9550"
 
 Open `http://ip:9550` and follow the `Scrape Xray Metrics` link to see the output. If `xray_up 1` is missing from the response, the scrape failed and the exporter logs will say why.
 
-Then point Prometheus at it:
+### Prometheus
 
 ```yaml
 global:
@@ -159,9 +185,11 @@ scrape_configs:
       - targets: [IP:9550]
 ```
 
-Our Grafana dashboard is on [grafana.com](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/).
+### Grafana
 
-## Options
+Import [dashboard 23181](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/) from grafana.com, or build your own from the [metrics reference](#metrics-reference).
+
+## Flags
 
 | Flag | Default | Description |
 | :--- | :------ | :---------- |
@@ -179,9 +207,9 @@ Our Grafana dashboard is on [grafana.com](https://grafana.com/grafana/dashboards
 
 `xray-exporter -h` prints the same list.
 
-## Metrics
+## Metrics reference
 
-### Runtime
+### Xray runtime
 
 | Xray stat | Exported metric | Description |
 | :-------- | :-------------- | :---------- |
@@ -208,7 +236,9 @@ Our Grafana dashboard is on [grafana.com](https://grafana.com/grafana/dashboards
 
 The `dimension="user"` rows are opt-in. Pass `--user-traffic-metrics` to turn them on. Every user becomes its own series with no top-N cap, so only do this where the set of users is small and known.
 
-### User activity from the access log
+### User activity
+
+Only exported when `--log-path` points at a readable access log.
 
 | Metric | Type | Description | Labels |
 | :----- | :--- | :---------- | :----- |
@@ -219,6 +249,8 @@ The `dimension="user"` rows are opt-in. Pass `--user-traffic-metrics` to turn th
 | `xray_unique_users` | gauge | Unique users active in the time window | |
 | `xray_total_connections` | gauge | Connections in the time window | |
 | `xray_outbound_requests` | gauge | Requests per outbound in the time window | `outbound` |
+
+#### Querying them
 
 The counters only go up. Rotating the log, truncating it, or a quiet spell long enough for the window to age every key out all leave them alone. Only restarting the exporter puts them back to zero, which Prometheus reads as an ordinary counter reset.
 
