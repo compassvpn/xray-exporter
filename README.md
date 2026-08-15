@@ -1,89 +1,50 @@
 # Xray Exporter
 
-An exporter that collects Xray _(and V2Ray)_ metrics over its Stats API and exports them to Prometheus. It also provides enhanced user activity metrics by parsing access logs.
+A Prometheus exporter for Xray and V2Ray. It reads runtime and traffic statistics from Xray's gRPC Stats API, and optionally parses the access log to report who is connecting, from where, and to which destinations.
 
-## Features
+Rotation is detected by inode, so log parsing is unix only. Linux and macOS builds are published.
 
-- **Runtime Metrics**: Memory usage, goroutines, uptime, GC stats
-- **Traffic Statistics**: Per-user, per-inbound, per-outbound data transfer metrics  
-- **User Activity Metrics**: Real-time user counts, connection patterns
-- **Domain Analytics**: Most requested domains and direct IP access tracking
-- **GeoIP Intelligence**: Automated Top ASNs, Countries, and Cities tracking with auto-downloading databases
-- **Outbound Routing**: Traffic distribution across different outbound connections (includes blocked requests)
-- **High Performance**: Optimized log parsing with circular buffers and LRU caching
-- **Adaptive buffers**: Connection buffer sized by the time window and grown lazily as traffic arrives
-- **Linux and macOS**: with proper log rotation detection
+## What you can put on a dashboard
 
-## Quick Start
+From the access log:
+
+- Unique users and open connections over a rolling window
+- Top requested domains, with subdomains folded into their registrable domain
+- Top direct IP destinations, with localhost, private ranges, and the usual public DNS resolvers filtered out
+- Top ASNs with their network name, top countries, and top cities, resolved from GeoLite2 databases the exporter downloads and refreshes on its own
+- A world map of connections by country or city
+- How traffic splits across your outbounds, including whichever tag your config uses for blocked traffic
+
+From the Stats API:
+
+- Bytes up and down per inbound and per outbound
+- Bytes up and down per user, off by default because it is one series per user
+- Xray process health: uptime, goroutine count, heap usage, and GC pauses
+- Whether the last scrape worked and how long it took
+
+Our CompassVPN dashboard is published on [grafana.com](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/) if you want a starting point. The [metrics reference](#metrics-reference) below has the queries if you would rather build your own.
+
+## Install
 
 ### Binaries
 
-The latest binaries are made available on the [GitHub Releases Page](https://github.com/compassvpn/xray-exporter/releases/latest).
+Linux (amd64, arm64, arm) and macOS (amd64, arm64) builds are on the [releases page](https://github.com/compassvpn/xray-exporter/releases/latest).
 
 ### Docker
 
-You can also find the Docker images built automatically by CI from [GitHub Container Registry](https://github.com/compassvpn/xray-exporter/pkgs/container/xray-exporter). The images are made for multi-arch.
+Multi-arch images (amd64, arm64, arm/v7) are published to the [GitHub Container Registry](https://github.com/compassvpn/xray-exporter/pkgs/container/xray-exporter):
 
 ```bash
-docker run --rm -it --read-only ghcr.io/compassvpn/xray-exporter:latest
+docker run --rm -it ghcr.io/compassvpn/xray-exporter:latest
 ```
 
-Available tags:
-- main _(Latest commit: may not be stable)_
-- latest _(Recommended: Points to latest stable build)_
-- 0.0.1 _(And any version number)_
+Three kinds of tag are available: `latest` follows the newest release, a version tag like `v0.6.6` pins to one release, and `main` is built from the tip of the main branch and may not be stable.
 
-### Grafana Dashboard
+## Setup
 
-Our CompassVPN Grafana dashboard is available [here](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/). Please refer to the Grafana docs to get the steps for importing dashboards from JSON files.
+### Xray config
 
-## Command Line Options
-
-You can view all available command line options by running:
-
-```bash
-xray-exporter -h
-```
-
-Available options:
-
-```
-Usage:
-  xray-exporter [OPTIONS]
-
-Application Options:
-  -l, --listen=[ADDR]:PORT         Listen address (default: :9550)
-  -m, --metrics-path=PATH          Metrics path (default: /scrape)
-  -e, --xray-endpoint=HOST:PORT    Xray API endpoint (default: 127.0.0.1:8080)
-  -t, --scrape-timeout=N           The timeout in seconds for every individual scrape (default: 3)
-  -u, --user-traffic-metrics       Export per-user traffic byte counters
-                                   (high cardinality: one series per user)
-  -p, --log-path=PATH              Path to Xray access log file (empty to disable user metrics) 
-                                   (default: /var/log/xray/access.log)
-  -w, --log-time-window=N          Time window in minutes for user metrics (default: 5)
-  -g, --geoip-dir=PATH             Directory for GeoLite2 databases (default: .)
-      --version                    Display the version and exit
-      --log-level=LEVEL            Log level: error, warn, info, debug
-                                   (env: LOG_LEVEL) (default: warn)
-
-Help Options:
-  -h, --help                       Show this help message
-```
-
-### User Activity Metrics
-
-The exporter can parse Xray access logs to provide additional user activity insights:
-
-- **`--log-path`**: Path to Xray access log file. Set to empty string to disable user metrics.
-- **`--log-time-window`**: Time window in minutes for user activity metrics (default: 5 minutes).
-
-These metrics help you understand user behavior, popular domains, and traffic patterns in real-time.
-
-## Tutorial
-
-Before we start, let's assume you have already set up Prometheus and Grafana.
-
-First, you need to make sure the API and statistics-related features have been enabled in your Xray _(or V2Ray)_ config file. For example:
+The exporter talks to Xray's Stats API, so the `api`, `stats`, and `policy` blocks all need to be present, along with a routing rule that sends the API inbound to the API outbound:
 
 ```json
 {
@@ -153,13 +114,13 @@ First, you need to make sure the API and statistics-related features have been e
 }
 ```
 
-As you can see, we opened two inbounds in the configuration above. The first inbound listens on port 54321 on localhost and handles the API calls, which is the endpoint that the exporter scrapes. The second inbound accepts VMess connections from the user `email`. If you'd like to run Xray/V2Ray and an exporter on different machines, consider using `0.0.0.0` instead of `127.0.0.1`, but be careful with the security risks.
+There are two inbounds here. The first listens on port 54321 on localhost and answers the API calls the exporter makes. The second is an ordinary VMess inbound for the user `email`. If the exporter runs on a different machine than Xray, listen on `0.0.0.0` instead of `127.0.0.1` and firewall the port, since anyone who can reach it can read your stats.
 
-Additionally, you should also enable `stats`, `api`, and `policy` settings, and set up proper routing rules to get traffic statistics working. For more information, please visit [xray-core API docs](https://xtls.github.io/config/api.html) and [xray-core Stats docs](https://xtls.github.io/en/config/stats.html).
+See the [xray-core API docs](https://xtls.github.io/config/api.html) and [stats docs](https://xtls.github.io/en/config/stats.html) for the details.
 
-### Enable Access Log (Optional)
+### Access log
 
-To get user activity metrics, enable access logging in your Xray config:
+Everything under [user activity](#user-activity) below comes from the access log, which is off unless you turn it on:
 
 ```json
 {
@@ -171,38 +132,36 @@ To get user activity metrics, enable access logging in your Xray config:
 }
 ```
 
-The exporter will automatically parse this log file to provide additional metrics about user activity, popular domains, and traffic patterns.
+## Running it
 
-### GeoIP Tracking
-
-The exporter automatically downloads and maintains the latest GeoLite2 databases (ASN, Country, City) from [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb) on startup. No manual setup is required.
-
-These databases enable high-precision tracking of:
-- **Top ASNs**: Identify which networks your users are coming from.
-- **Top Countries**: See geographic distribution by country.
-- **Top Cities**: Granular city-level connection statistics.
-
-### Start the Exporter
+### Starting the exporter
 
 ```bash
-# Basic usage (gRPC metrics only)
+# gRPC metrics only
 xray-exporter --xray-endpoint "127.0.0.1:54321"
 
-# With user activity metrics from logs
+# plus user activity from the access log
 xray-exporter --xray-endpoint "127.0.0.1:54321" --log-path "/var/log/xray/access.log"
 
-# With custom time window for user metrics
+# with a 10 minute window instead of the default 5
 xray-exporter --xray-endpoint "127.0.0.1:54321" --log-time-window 10
-
-# Or with Docker
-docker run --rm -d --read-only \
-  -v /var/log/xray:/var/log/xray:ro \
-  ghcr.io/compassvpn/xray-exporter:latest \
-  --xray-endpoint "xray:54321" \
-  --log-path "/var/log/xray/access.log"
 ```
 
-The logs signify that the exporter started to listen on the default address (`:9550`).
+Or in Docker, with the log mounted read-only and a writable directory for the GeoIP databases:
+
+```bash
+docker run --rm -d \
+  -v /var/log/xray:/var/log/xray:ro \
+  -v xray-exporter-geoip:/geoip \
+  ghcr.io/compassvpn/xray-exporter:latest \
+  --xray-endpoint "xray:54321" \
+  --log-path "/var/log/xray/access.log" \
+  --geoip-dir /geoip
+```
+
+The GeoLite2 databases are written to `--geoip-dir`, which defaults to the working directory. Inside the container that is `/`, so a container started with `--read-only` and no writable volume cannot download them. That is not fatal, but the ASN, country, and city metrics stay empty.
+
+On startup you should see:
 
 ```plain
 Xray Exporter XXX-a1b2c3d (built 2025-01-01T21:00:00Z)
@@ -210,32 +169,9 @@ time="2025-01-15T10:30:45Z" level=info msg="Log parser started successfully"
 time="2025-01-15T10:30:45Z" level=info msg="Server starting on :9550"
 ```
 
-Use `--listen` option if you'd like to change the listen address or port. You can open `http://ip:9550` in your browser:
+Open `http://ip:9550` and follow the `Scrape Xray Metrics` link to see the output. If `xray_up 1` is missing from the response, the scrape failed and the exporter logs will say why.
 
-Click the `Scrape Xray Metrics` and the exporter will expose all metrics, including Xray/V2Ray runtime and statistics data in the Prometheus metrics format, for example:
-
-```shell
-...
-# HELP xray_up Indicate scrape succeeded or not
-# TYPE xray_up gauge
-xray_up 1
-# HELP xray_uptime_seconds Xray uptime in seconds
-# TYPE xray_uptime_seconds gauge
-xray_uptime_seconds 150624
-
-# User activity metrics (if log parsing enabled)
-# HELP xray_unique_users Number of unique users in time window
-# TYPE xray_unique_users gauge
-xray_unique_users 42
-# HELP xray_total_connections Total number of connections in time window
-# TYPE xray_total_connections gauge  
-xray_total_connections 1337
-...
-```
-
-If `xray_up 1` doesn't exist in the response, that means the scrape failed. Please check out the logs (STDOUT or STDERR) of Xray Exporter for more detailed information.
-
-We have the metrics exposed. Now let Prometheus scrape these data points and visualize them with Grafana. Here is an example Prometheus configuration:
+### Prometheus
 
 ```yaml
 global:
@@ -249,96 +185,110 @@ scrape_configs:
       - targets: [IP:9550]
 ```
 
-To learn more about Prometheus, please visit the [official docs](https://prometheus.io/docs/prometheus/latest/configuration/configuration/).
+### Grafana
 
-## Available Metrics
+Import [dashboard 23181](https://grafana.com/grafana/dashboards/23181-compassvpn-dashboard/) from grafana.com, or build your own from the [metrics reference](#metrics-reference).
 
-### Runtime Metrics
+## Flags
 
-| Runtime Metric   | Exposed Metric                     | Description |
-| :--------------- | :--------------------------------- | :---------- |
-| `uptime`         | `xray_uptime_seconds`             | Xray uptime in seconds |
-| `num_goroutine`  | `xray_goroutines`                 | Number of goroutines |
-| `alloc`          | `xray_memstats_alloc_bytes`       | Bytes allocated and in use |
-| `total_alloc`    | `xray_memstats_alloc_bytes_total` | Total bytes allocated |
-| `sys`            | `xray_memstats_sys_bytes`         | Bytes obtained from system |
-| `mallocs`        | `xray_memstats_mallocs_total`     | Total number of mallocs |
-| `frees`          | `xray_memstats_frees_total`       | Total number of frees |
-| `num_gc`         | `xray_memstats_num_gc`            | Number of GC cycles |
-| `pause_total_ns` | `xray_memstats_pause_total_ns`    | Total GC pause time |
+| Flag | Default | Description |
+| :--- | :------ | :---------- |
+| `-l, --listen [ADDR]:PORT` | `:9550` | Address to listen on |
+| `-m, --metrics-path PATH` | `/scrape` | Path that serves the Xray metrics |
+| `-e, --xray-endpoint HOST:PORT` | `127.0.0.1:8080` | Xray API endpoint |
+| `-t, --scrape-timeout N` | `5` | Timeout in seconds for each individual scrape |
+| `-u, --user-traffic-metrics` | off | Export per-user traffic byte counters |
+| `-p, --log-path PATH` | `/var/log/xray/access.log` | Access log to parse. Empty disables the log metrics |
+| `-w, --log-time-window N` | `5` | Window in minutes for the log metrics |
+| `-g, --geoip-dir PATH` | `.` | Directory for the GeoLite2 databases |
+| `--log-level LEVEL` | `info` | `error`, `warn`, `info`, or `debug`. Also read from `LOG_LEVEL` |
+| `--log-format FORMAT` | `text` | `text` or `json`. Also read from `LOG_FORMAT` |
+| `--version` | | Print the version and exit |
 
-### Traffic Statistics
+`xray-exporter -h` prints the same list.
 
-| Statistic Metric                          | Exposed Metric                                                              |
-| :---------------------------------------- | :-------------------------------------------------------------------------- |
-| `inbound>>>tag-name>>>traffic>>>uplink`   | `xray_traffic_uplink_bytes_total{dimension="inbound",target="tag-name"}`   |
+## Metrics reference
+
+### Xray runtime
+
+| Xray stat | Exported metric | Description |
+| :-------- | :-------------- | :---------- |
+| `uptime` | `xray_uptime_seconds` | Xray uptime in seconds |
+| `num_goroutine` | `xray_goroutines` | Number of goroutines |
+| `alloc` | `xray_memstats_alloc_bytes` | Bytes allocated and in use |
+| `total_alloc` | `xray_memstats_alloc_bytes_total` | Total bytes allocated |
+| `sys` | `xray_memstats_sys_bytes` | Bytes obtained from the OS |
+| `mallocs` | `xray_memstats_mallocs_total` | Total number of mallocs |
+| `frees` | `xray_memstats_frees_total` | Total number of frees |
+| `num_gc` | `xray_memstats_num_gc` | Number of GC cycles |
+| `pause_total_ns` | `xray_memstats_pause_total_ns` | Total GC pause time |
+
+### Traffic
+
+| Xray stat | Exported metric |
+| :-------- | :-------------- |
+| `inbound>>>tag-name>>>traffic>>>uplink` | `xray_traffic_uplink_bytes_total{dimension="inbound",target="tag-name"}` |
 | `inbound>>>tag-name>>>traffic>>>downlink` | `xray_traffic_downlink_bytes_total{dimension="inbound",target="tag-name"}` |
-| `outbound>>>tag-name>>>traffic>>>uplink`   | `xray_traffic_uplink_bytes_total{dimension="outbound",target="tag-name"}`   |
+| `outbound>>>tag-name>>>traffic>>>uplink` | `xray_traffic_uplink_bytes_total{dimension="outbound",target="tag-name"}` |
 | `outbound>>>tag-name>>>traffic>>>downlink` | `xray_traffic_downlink_bytes_total{dimension="outbound",target="tag-name"}` |
-| `user>>>user-email>>>traffic>>>uplink`     | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`    |
-| `user>>>user-email>>>traffic>>>downlink`  | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`  |
+| `user>>>user-email>>>traffic>>>uplink` | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}` |
+| `user>>>user-email>>>traffic>>>downlink` | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}` |
 
-> **Per-user traffic is opt-in.** The `dimension="user"` rows above are **not exported by default** — pass `--user-traffic-metrics` (`-u`) to enable them. Each user becomes its own series with no top-N cap, so only enable this on instances with a bounded, known set of users.
+The `dimension="user"` rows are opt-in. Pass `--user-traffic-metrics` to turn them on. Every user becomes its own series with no top-N cap, so only do this where the set of users is small and known.
 
-### User Activity Metrics (Log Parsing)
+### User activity
 
-| Metric | Description | Labels |
-| :----- | :---------- | :----- |
-| `xray_requested_domain_ip_total` | Requests per domain or IP address, counted since startup | `target` |
-| `xray_asns_total` | Requests per ASN, counted since startup | `asn`, `org` |
-| `xray_countries_total` | Requests per country, counted since startup | `country` |
-| `xray_cities_total` | Requests per city, counted since startup | `city`, `country` |
-| `xray_unique_users` | Number of unique users active in the time window | - |
-| `xray_total_connections` | Total number of connections in the time window | - |
-| `xray_outbound_requests` | Requests per outbound connection (top-N in time window) | `outbound` |
+Only exported when `--log-path` points at a readable access log.
 
-The `_total` metrics are counters, so use them with `rate()` and `increase()`. They only go up. Rotating the log, truncating it, or a quiet spell long enough for the time window to age out all leave them alone. Only restarting the exporter puts them back to zero, and that is a normal counter reset.
+| Metric | Type | Description | Labels |
+| :----- | :--- | :---------- | :----- |
+| `xray_requested_domain_ip_total` | counter | Requests per domain or IP since startup | `target` |
+| `xray_asns_total` | counter | Requests per ASN since startup | `asn`, `org` |
+| `xray_countries_total` | counter | Requests per country since startup | `country` |
+| `xray_cities_total` | counter | Requests per city since startup | `city`, `country` |
+| `xray_unique_users` | gauge | Unique users active in the time window | |
+| `xray_total_connections` | gauge | Connections in the time window | |
+| `xray_outbound_requests` | gauge | Requests per outbound in the time window | `outbound` |
 
-Which targets get exported is based on how busy they are in the time window. A target that goes quiet drops out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one.
+#### Querying them
 
-The other three are gauges describing the current time window, so don't use `rate()` or `increase()` on them.
+The counters only go up. Rotating the log, truncating it, or a quiet spell long enough for the window to age every key out all leave them alone. Only restarting the exporter puts them back to zero, which Prometheus reads as an ordinary counter reset.
 
-### Core Metrics
+Which keys get exported is a separate question from their value, and it depends on how busy each key is in the current window. A target that goes quiet falls out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one. The limits are 50 domains, 50 direct IPs, 50 outbounds, and 20 each for ASNs, countries, and cities.
+
+The three gauges describe the window as it is right now, so `rate()` and `increase()` do not mean anything on them.
+
+Since the rest are counters, wrap them in `increase()` over the panel range:
+
+```promql
+topk(10, sum by (asn, org) (increase(xray_asns_total[$__range])))
+topk(10, sum by (country) (increase(xray_countries_total[$__range])))
+topk(10, sum by (city, country) (increase(xray_cities_total[$__range])))
+topk(10, sum by (target) (increase(xray_requested_domain_ip_total[$__range])))
+```
+
+### Exporter health
 
 | Metric | Description |
 | :----- | :---------- |
-| `xray_up` | Whether the last scrape was successful (1 = success, 0 = failure) |
-| `xray_scrape_duration_seconds` | Time spent scraping metrics from Xray |
-| `xray_scrapes_total` | Total number of scrapes performed |
+| `xray_up` | Whether the last scrape succeeded (1 or 0) |
+| `xray_scrape_duration_seconds` | Time spent scraping Xray |
+| `xray_scrapes_total` | Number of scrapes performed |
 
-### Recommended Grafana Queries
+## Memory
 
-These are counters, so wrap them in `increase()` over the panel's range to get the requests that happened in that range:
-
-- **Top 10 ASNs**: `topk(10, sum by (asn, org) (increase(xray_asns_total[$__range])))`
-- **Top 10 Countries**: `topk(10, sum by (country) (increase(xray_countries_total[$__range])))`
-- **Top 10 Cities**: `topk(10, sum by (city, country) (increase(xray_cities_total[$__range])))`
-- **Top 10 Domains/IPs**: `topk(10, sum by (target) (increase(xray_requested_domain_ip_total[$__range])))`
-
-## Performance & Scalability
-
-This exporter is optimized for high-traffic proxy services:
-
-- **Memory Efficient**: Circular buffers prevent memory leaks from connection tracking
-- **High Performance**: Optimized log parsing with smart caching and buffering
-- **Auto-scaling**: Buffer sizes automatically adapt to time window settings
-- **Concurrent Safe**: Lock-free operations where possible, minimal lock contention
-- **Production Ready**: Handles log rotation, file truncation, and network failures gracefully
+Connection timestamps go into a circular buffer sized from the time window: 500k entries for windows of 5 minutes or less, up to 5M above 30 minutes. It grows with traffic instead of being allocated upfront, so a quiet server never pays for the full buffer. Per-key maps are capped at 10,000 keys as a backstop against random-subdomain floods, which sits far above any top-N that actually gets exported. IP filter lookups are cached in an LRU so repeated addresses skip the network range checks.
 
 ## Development
 
-Before committing, run this single command to format, vet, and build the
-project. It mirrors the checks CI runs, so if it passes locally the lint gate
-will pass too:
+Before committing, run the checks CI runs:
 
 ```bash
 gofmt -w . && go vet ./... && go build ./...
 ```
 
-- `gofmt -w .` rewrites any mis-formatted files in place
-- `go vet ./...` catches common mistakes
-- `go build ./...` confirms everything compiles
+If that passes locally, the lint gate will pass too.
 
-## Special Thanks
+## Special thanks
 
 - <https://github.com/wi1dcard/v2ray-exporter>
