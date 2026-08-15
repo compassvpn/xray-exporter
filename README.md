@@ -250,35 +250,6 @@ Only exported when `--log-path` points at a readable access log.
 | `xray_total_connections` | gauge | Connections in the time window | |
 | `xray_outbound_requests` | gauge | Requests per outbound in the time window | `outbound` |
 
-#### Querying them
-
-The counters only go up. Rotating the log, truncating it, or a quiet spell long enough for the window to age every key out all leave them alone. Only restarting the exporter puts them back to zero, which Prometheus reads as an ordinary counter reset.
-
-Which keys get exported is a separate question from their value, and it depends on how busy each key is in the current window. A target that goes quiet falls out of the top-N and its series ends there. When traffic comes back the series comes back at a higher value, never a lower one. The limits are 50 domains, 50 direct IPs, 50 outbounds, and 20 each for ASNs, countries, and cities.
-
-The three gauges describe the window as it is right now, so `rate()` and `increase()` do not mean anything on them.
-
-Since the rest are counters, wrap them in `increase()` over the panel range:
-
-```promql
-topk(10, sum by (asn, org) (increase(xray_asns_total[$__range])))
-topk(10, sum by (country) (increase(xray_countries_total[$__range])))
-topk(10, sum by (city, country) (increase(xray_cities_total[$__range])))
-topk(10, sum by (target) (increase(xray_requested_domain_ip_total[$__range])))
-```
-
-### Exporter health
-
-| Metric | Description |
-| :----- | :---------- |
-| `xray_up` | Whether the last scrape succeeded (1 or 0) |
-| `xray_scrape_duration_seconds` | Time spent scraping Xray |
-| `xray_scrapes_total` | Number of scrapes performed |
-
-## Memory
-
-Connection timestamps go into a circular buffer sized from the time window: 500k entries for windows of 5 minutes or less, up to 5M above 30 minutes. It grows with traffic instead of being allocated upfront, so a quiet server never pays for the full buffer. Per-key maps are capped at 10,000 keys as a backstop against random-subdomain floods, which sits far above any top-N that actually gets exported. IP filter lookups are cached in an LRU so repeated addresses skip the network range checks.
-
 ## Development
 
 Before committing, run the checks CI runs:
@@ -286,8 +257,6 @@ Before committing, run the checks CI runs:
 ```bash
 gofmt -w . && go vet ./... && go build ./...
 ```
-
-If that passes locally, the lint gate will pass too.
 
 ## Special thanks
 
