@@ -88,29 +88,29 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 		"memstats_pause_total_ns":    {txt: "Cumulative nanoseconds in GC stop-the-world pauses"},
 
 		// User activity metrics from log parsing.
-		// The per-target counts below are gauges: keys are expired out of the time
-		// window and only the top-N are exported each scrape, so the value is not
-		// monotonic and must not carry a _total suffix.
 		"unique_users":      {txt: "Number of unique users in time window"},
 		"total_connections": {txt: "Total number of connections in time window"},
-		"requested_domain_ip": {
-			txt:  "Number of requests per domain or IP (top-N in time window)",
-			lbls: []string{"target"},
-		},
 		"outbound_requests": {
 			txt:  "Number of requests per outbound (top-N in time window)",
 			lbls: []string{"outbound"},
 		},
-		"asns": {
-			txt:  "Number of requests per ASN (top-N in time window)",
+
+		// Cumulative per-target counters. They only ever rise, apart from a
+		// restart, which is a normal counter reset.
+		"requested_domain_ip_total": {
+			txt:  "Requests per domain or IP since startup (top-N by activity in the time window)",
+			lbls: []string{"target"},
+		},
+		"asns_total": {
+			txt:  "Requests per ASN since startup (top-N by activity in the time window)",
 			lbls: []string{"asn", "org"},
 		},
-		"countries": {
-			txt:  "Number of requests per country (top-N in time window)",
+		"countries_total": {
+			txt:  "Requests per country since startup (top-N by activity in the time window)",
 			lbls: []string{"country"},
 		},
-		"cities": {
-			txt:  "Number of requests per city (top-N in time window)",
+		"cities_total": {
+			txt:  "Requests per city since startup (top-N by activity in the time window)",
 			lbls: []string{"city", "country"},
 		},
 	} {
@@ -389,21 +389,22 @@ func (e *Exporter) collectLogMetrics(ch chan<- prometheus.Metric) {
 }
 
 // Collects domain and IP request statistics from log parser.
+// Keys are picked by activity in the time window, so panels show what is busy
+// now, but the exported value is the cumulative total so it never goes down.
+// A key that falls out of the top-N leaves a gap and comes back higher.
 func (e *Exporter) collectDomainMetrics(ch chan<- prometheus.Metric) {
 	if e.logParser == nil {
 		return
 	}
 
-	metricDesc := e.metricDescriptions["requested_domain_ip"]
-
-	// Only export the top domains and IPs to prevent cardinality leak.
-	// These are gauges: the backing keys are expired out of the time window, so
-	// the value is not monotonic and must not be treated as a counter.
+	totals := e.logParser.GetDomainTotals()
 	for _, entry := range topN(e.logParser.GetDomainCounts(), logparser.MaxTrackedDomains) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
+		e.registerConstMetricCounter(ch, "requested_domain_ip_total", float64(totals[entry.key]), entry.key)
 	}
+
+	ipTotals := e.logParser.GetIPTotals()
 	for _, entry := range topN(e.logParser.GetIPCounts(), logparser.MaxTrackedIPs) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
+		e.registerConstMetricCounter(ch, "requested_domain_ip_total", float64(ipTotals[entry.key]), entry.key)
 	}
 }
 
@@ -415,7 +416,8 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 
 	metricDesc := e.metricDescriptions["outbound_requests"]
 
-	// Top-N only, to bound cardinality (gauge, see note in collectDomainMetrics).
+	// Top-N only, to bound cardinality. A gauge: its keys age out of the
+	// time window, so the value goes down as well as up.
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
 		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
 	}
@@ -427,15 +429,11 @@ func (e *Exporter) collectASNMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
+	totals := e.logParser.GetASNTotals()
 	for _, entry := range topN(e.logParser.GetASNCounts(), logparser.MaxTrackedASNs) {
 		// Key format: asn|org.
-		parts := strings.Split(entry.key, "|")
-		asn := parts[0]
-		org := ""
-		if len(parts) > 1 {
-			org = parts[1]
-		}
-		e.registerConstMetricGauge(ch, "asns", float64(entry.count), asn, org)
+		asn, org, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricCounter(ch, "asns_total", float64(totals[entry.key]), asn, org)
 	}
 }
 
@@ -445,8 +443,9 @@ func (e *Exporter) collectCountryMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
+	totals := e.logParser.GetCountryTotals()
 	for _, entry := range topN(e.logParser.GetCountryCounts(), logparser.MaxTrackedCountries) {
-		e.registerConstMetricGauge(ch, "countries", float64(entry.count), entry.key)
+		e.registerConstMetricCounter(ch, "countries_total", float64(totals[entry.key]), entry.key)
 	}
 }
 
@@ -456,15 +455,11 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
+	totals := e.logParser.GetCityTotals()
 	for _, entry := range topN(e.logParser.GetCityCounts(), logparser.MaxTrackedCities) {
 		// Key format: city|country.
-		parts := strings.Split(entry.key, "|")
-		city := parts[0]
-		country := ""
-		if len(parts) > 1 {
-			country = parts[1]
-		}
-		e.registerConstMetricGauge(ch, "cities", float64(entry.count), city, country)
+		city, country, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricCounter(ch, "cities_total", float64(totals[entry.key]), city, country)
 	}
 }
 

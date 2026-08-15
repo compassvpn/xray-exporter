@@ -56,10 +56,6 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
     steps:
     - uses: actions/checkout@v7
       with:
@@ -86,8 +82,7 @@ jobs:
         # Build binary
         mkdir -p dist
         BINARY="xray-exporter-${{ matrix.goos }}-${{ matrix.goarch }}"
-        [ "${{ matrix.goos }}" = "windows" ] && BINARY="${BINARY}.exe"
-        
+
         go build -ldflags="-s -w -X main.buildCommit=${{ github.sha }} -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.buildVersion=${VERSION}" -o "dist/${BINARY}" .
         
         # Make binary executable
