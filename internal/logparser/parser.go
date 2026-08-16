@@ -848,7 +848,9 @@ func extractDomainOptimized(line string) string {
 		return ""
 	}
 
-	return domainPort[:colonIdx]
+	// Xray brackets IPv6 literals, the same way it does for the client address.
+	// Strip them so the host is classified as an IP rather than a domain.
+	return strings.Trim(domainPort[:colonIdx], "[]")
 }
 
 // Canonicalizes an IP address string and returns both the canonical string
