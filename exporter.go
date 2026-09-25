@@ -89,14 +89,26 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 
 		// User activity metrics from log parsing.
 		"unique_users":      {txt: "Number of unique users in time window"},
-		"total_connections": {txt: "Total number of connections in time window"},
-		"outbound_requests": {
-			txt:  "Number of requests per outbound (top-N in time window)",
-			lbls: []string{"outbound"},
+		"total_connections": {txt: "Number of requests (connections opened) in time window"},
+		"unique_users_by_country": {
+			txt:  "Unique users per country in time window (top-N)",
+			lbls: []string{"country"},
+		},
+		"unique_users_by_city": {
+			txt:  "Unique users per city in time window (top-N)",
+			lbls: []string{"city", "country"},
+		},
+		"unique_users_by_asn": {
+			txt:  "Unique users per ASN in time window (top-N)",
+			lbls: []string{"asn", "org"},
 		},
 
 		// Cumulative per-target counters. They only ever rise, apart from a
 		// restart, which is a normal counter reset.
+		"outbound_requests_total": {
+			txt:  "Requests per outbound since startup (top-N by activity in the time window)",
+			lbls: []string{"outbound"},
+		},
 		"requested_domain_ip_total": {
 			txt:  "Requests per domain or IP since startup (top-N by activity in the time window)",
 			lbls: []string{"target"},
@@ -203,6 +215,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.collectASNMetrics(ch)
 	e.collectCountryMetrics(ch)
 	e.collectCityMetrics(ch)
+	e.collectUserGeoMetrics(ch)
 
 	e.registerConstMetricGauge(ch, "up", up)
 	e.registerConstMetricGauge(ch, "scrape_duration_seconds", time.Since(start).Seconds())
@@ -414,12 +427,9 @@ func (e *Exporter) collectOutboundMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	metricDesc := e.metricDescriptions["outbound_requests"]
-
-	// Top-N only, to bound cardinality. A gauge: its keys age out of the
-	// time window, so the value goes down as well as up.
+	totals := e.logParser.GetOutboundTotals()
 	for _, entry := range topN(e.logParser.GetOutboundCounts(), logparser.MaxTrackedOutbounds) {
-		ch <- prometheus.MustNewConstMetric(metricDesc, prometheus.GaugeValue, float64(entry.count), entry.key)
+		e.registerConstMetricCounter(ch, "outbound_requests_total", float64(totals[entry.key]), entry.key)
 	}
 }
 
@@ -460,6 +470,26 @@ func (e *Exporter) collectCityMetrics(ch chan<- prometheus.Metric) {
 		// Key format: city|country.
 		city, country, _ := strings.Cut(entry.key, "|")
 		e.registerConstMetricCounter(ch, "cities_total", float64(totals[entry.key]), city, country)
+	}
+}
+
+// Collects unique users (distinct client IPs) per country, city and ASN.
+func (e *Exporter) collectUserGeoMetrics(ch chan<- prometheus.Metric) {
+	if e.logParser == nil {
+		return
+	}
+
+	countries, cities, asns := e.logParser.GetUserGeoCounts()
+	for _, entry := range topN(countries, logparser.MaxTrackedCountries) {
+		e.registerConstMetricGauge(ch, "unique_users_by_country", float64(entry.count), entry.key)
+	}
+	for _, entry := range topN(cities, logparser.MaxTrackedCities) {
+		city, country, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricGauge(ch, "unique_users_by_city", float64(entry.count), city, country)
+	}
+	for _, entry := range topN(asns, logparser.MaxTrackedASNs) {
+		asn, org, _ := strings.Cut(entry.key, "|")
+		e.registerConstMetricGauge(ch, "unique_users_by_asn", float64(entry.count), asn, org)
 	}
 }
 
