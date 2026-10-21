@@ -634,6 +634,7 @@ func (p *Parser) parseLogFile() error {
 
 	p.mu.Lock()
 	currentInode := getInode(stat)
+	firstRun := p.metrics.LastInode == 0
 
 	switch {
 	case p.metrics.LastInode == 0:
@@ -679,8 +680,11 @@ func (p *Parser) parseLogFile() error {
 
 	// Merge the batch under the metrics lock. No parsing or I/O happens here,
 	// so scrapes are only blocked for the duration of a few map merges.
+	// The first run's backlog only fills the window. The previous process
+	// already counted most of it, so adding it to the totals would show a
+	// bump after every restart.
 	p.metrics.mu.Lock()
-	p.mergeDelta(delta)
+	p.mergeDelta(delta, !firstRun)
 	p.metrics.mu.Unlock()
 
 	p.mu.Lock()
@@ -776,7 +780,7 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 }
 
 // Folds a parsed batch into the shared metrics. Caller must hold metrics.mu.
-func (p *Parser) mergeDelta(d *metricsDelta) {
+func (p *Parser) mergeDelta(d *metricsDelta, countTotals bool) {
 	mergeCounts(p.metrics.DomainCounts, d.domainCounts)
 	mergeCounts(p.metrics.IPCounts, d.ipCounts)
 	mergeCounts(p.metrics.OutboundCounts, d.outboundCounts)
@@ -784,12 +788,14 @@ func (p *Parser) mergeDelta(d *metricsDelta) {
 	mergeCounts(p.metrics.CountryCounts, d.countryCounts)
 	mergeCounts(p.metrics.CityCounts, d.cityCounts)
 
-	addTotals(p.metrics.DomainTotals, d.domainCounts)
-	addTotals(p.metrics.IPTotals, d.ipCounts)
-	addTotals(p.metrics.OutboundTotals, d.outboundCounts)
-	addTotals(p.metrics.ASNTotals, d.asnCounts)
-	addTotals(p.metrics.CountryTotals, d.countryCounts)
-	addTotals(p.metrics.CityTotals, d.cityCounts)
+	if countTotals {
+		addTotals(p.metrics.DomainTotals, d.domainCounts)
+		addTotals(p.metrics.IPTotals, d.ipCounts)
+		addTotals(p.metrics.OutboundTotals, d.outboundCounts)
+		addTotals(p.metrics.ASNTotals, d.asnCounts)
+		addTotals(p.metrics.CountryTotals, d.countryCounts)
+		addTotals(p.metrics.CityTotals, d.cityCounts)
+	}
 
 	for ip, info := range d.uniqueIPs {
 		p.metrics.UniqueIPs[ip] = info
