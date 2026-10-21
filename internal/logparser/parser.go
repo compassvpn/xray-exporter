@@ -44,32 +44,48 @@ type LogEntry struct {
 	ParsedIP  net.IP
 }
 
-// A per-key request count together with the last time the key was seen, so
-// idle keys can be expired out of the time window.
-type windowedCount struct {
-	count    int64
+// Per-minute request counts for one key (unix minute -> count), so the key's
+// in-window total drops as its old minutes age out.
+type windowedCount map[int64]int64
+
+// Sums the minutes still held for the key.
+func (wc windowedCount) total() int64 {
+	var n int64
+	for _, c := range wc {
+		n += c
+	}
+	return n
+}
+
+// What we know about one client IP: when it was last seen and its GeoIP keys.
+// An empty country or city means the lookup found nothing.
+type ipInfo struct {
 	lastSeen time.Time
+	country  string
+	city     string // key format: city|country.
+	asn      string // key format: asn|org.
 }
 
 // Holds collected metrics for a specified time window.
 // Uses a circular buffer for connection timestamps to prevent memory growth.
 type MetricsData struct {
-	UniqueIPs      map[string]time.Time // IP -> last seen time.
-	DomainCounts   map[string]*windowedCount
-	IPCounts       map[string]*windowedCount // direct-IP requests.
-	OutboundCounts map[string]*windowedCount
-	ASNCounts      map[string]*windowedCount // key format: asn|org.
-	CountryCounts  map[string]*windowedCount
-	CityCounts     map[string]*windowedCount // key format: city|country.
+	UniqueIPs      map[string]ipInfo
+	DomainCounts   map[string]windowedCount
+	IPCounts       map[string]windowedCount // direct-IP requests.
+	OutboundCounts map[string]windowedCount
+	ASNCounts      map[string]windowedCount // key format: asn|org.
+	CountryCounts  map[string]windowedCount
+	CityCounts     map[string]windowedCount // key format: city|country.
 
 	// Cumulative per-key totals. Nothing expires these, so they only ever rise
 	// and can be exported as counters. A restart puts them back to zero, which
 	// is just a normal counter reset.
-	DomainTotals  map[string]int64
-	IPTotals      map[string]int64
-	ASNTotals     map[string]int64
-	CountryTotals map[string]int64
-	CityTotals    map[string]int64
+	DomainTotals   map[string]int64
+	IPTotals       map[string]int64
+	OutboundTotals map[string]int64
+	ASNTotals      map[string]int64
+	CountryTotals  map[string]int64
+	CityTotals     map[string]int64
 
 	// Circular buffer for connection timestamps to limit memory usage.
 	// The backing slice grows lazily up to ConnectionsBufCap so low-traffic
@@ -120,39 +136,36 @@ var (
 // lookups can run without holding the metrics lock. The deltas are merged into
 // the shared MetricsData under a brief lock at the end of a batch.
 type metricsDelta struct {
-	domainCounts   map[string]*windowedCount
-	ipCounts       map[string]*windowedCount
-	outboundCounts map[string]*windowedCount
-	asnCounts      map[string]*windowedCount
-	countryCounts  map[string]*windowedCount
-	cityCounts     map[string]*windowedCount
-	uniqueIPs      map[string]time.Time
+	domainCounts   map[string]windowedCount
+	ipCounts       map[string]windowedCount
+	outboundCounts map[string]windowedCount
+	asnCounts      map[string]windowedCount
+	countryCounts  map[string]windowedCount
+	cityCounts     map[string]windowedCount
+	uniqueIPs      map[string]ipInfo
 	timestamps     []time.Time
 }
 
 func newMetricsDelta() *metricsDelta {
 	return &metricsDelta{
-		domainCounts:   make(map[string]*windowedCount),
-		ipCounts:       make(map[string]*windowedCount),
-		outboundCounts: make(map[string]*windowedCount),
-		asnCounts:      make(map[string]*windowedCount),
-		countryCounts:  make(map[string]*windowedCount),
-		cityCounts:     make(map[string]*windowedCount),
-		uniqueIPs:      make(map[string]time.Time),
+		domainCounts:   make(map[string]windowedCount),
+		ipCounts:       make(map[string]windowedCount),
+		outboundCounts: make(map[string]windowedCount),
+		asnCounts:      make(map[string]windowedCount),
+		countryCounts:  make(map[string]windowedCount),
+		cityCounts:     make(map[string]windowedCount),
+		uniqueIPs:      make(map[string]ipInfo),
 	}
 }
 
-// Increments the per-key count in m and advances its last-seen time.
-func recordCount(m map[string]*windowedCount, key string, ts time.Time) {
+// Increments the key's count for the minute ts falls in.
+func recordCount(m map[string]windowedCount, key string, ts time.Time) {
 	wc := m[key]
 	if wc == nil {
-		wc = &windowedCount{}
+		wc = windowedCount{}
 		m[key] = wc
 	}
-	wc.count++
-	if ts.After(wc.lastSeen) {
-		wc.lastSeen = ts
-	}
+	wc[ts.Unix()/60]++
 }
 
 // Performs quick checks to skip obviously invalid lines before expensive parsing.
@@ -230,9 +243,10 @@ type countEntry struct {
 }
 
 // Expires per-key counts that have aged out of the time window and enforces a
-// memory backstop. Keys not seen since cutoff are dropped so stale winners fade
-// and idle keys stop consuming memory. If a map still exceeds SafetyMaxKeys
-// afterwards (a high-cardinality burst), only the highest-count keys are kept.
+// memory backstop. Minutes older than cutoff are dropped so a key's count only
+// covers the window, and keys left with no minutes are removed. If a map still
+// exceeds SafetyMaxKeys afterwards (a high-cardinality burst), only the
+// highest-count keys are kept.
 func (p *Parser) expireStaleCounts(cutoff time.Time) {
 	p.metrics.mu.Lock()
 	defer p.metrics.mu.Unlock()
@@ -245,11 +259,18 @@ func (p *Parser) expireStaleCounts(cutoff time.Time) {
 	expireCounts(p.metrics.CityCounts, cutoff)
 }
 
-// Drops keys last seen at or before cutoff, then applies the SafetyMaxKeys
+// Drops minutes before cutoff's minute, then applies the SafetyMaxKeys
 // backstop by keeping only the highest-count keys if still over the limit.
-func expireCounts(m map[string]*windowedCount, cutoff time.Time) {
-	for k, v := range m {
-		if !v.lastSeen.After(cutoff) {
+// The minute holding cutoff is kept, so the window can run up to a minute long.
+func expireCounts(m map[string]windowedCount, cutoff time.Time) {
+	cutoffMin := cutoff.Unix() / 60
+	for k, wc := range m {
+		for minute := range wc {
+			if minute < cutoffMin {
+				delete(wc, minute)
+			}
+		}
+		if len(wc) == 0 {
 			delete(m, k)
 		}
 	}
@@ -259,8 +280,8 @@ func expireCounts(m map[string]*windowedCount, cutoff time.Time) {
 	}
 
 	entries := make([]countEntry, 0, len(m))
-	for k, v := range m {
-		entries = append(entries, countEntry{key: k, count: v.count})
+	for k, wc := range m {
+		entries = append(entries, countEntry{key: k, count: wc.total()})
 	}
 	slices.SortFunc(entries, func(a, b countEntry) int {
 		return cmp.Compare(b.count, a.count)
@@ -280,6 +301,7 @@ func (p *Parser) capTotals() {
 
 	capCumulative(p.metrics.DomainTotals)
 	capCumulative(p.metrics.IPTotals)
+	capCumulative(p.metrics.OutboundTotals)
 	capCumulative(p.metrics.ASNTotals)
 	capCumulative(p.metrics.CountryTotals)
 	capCumulative(p.metrics.CityTotals)
@@ -311,8 +333,8 @@ func (p *Parser) expireWindowed(cutoff time.Time) {
 	p.metrics.mu.Lock()
 	defer p.metrics.mu.Unlock()
 
-	for ip, lastSeen := range p.metrics.UniqueIPs {
-		if !lastSeen.After(cutoff) {
+	for ip, info := range p.metrics.UniqueIPs {
+		if !info.lastSeen.After(cutoff) {
 			delete(p.metrics.UniqueIPs, ip)
 		}
 	}
@@ -359,15 +381,16 @@ func NewParser(config Config) (*Parser, error) {
 		countryReader: config.CountryReader,
 		cityReader:    config.CityReader,
 		metrics: &MetricsData{
-			UniqueIPs:            make(map[string]time.Time),
-			DomainCounts:         make(map[string]*windowedCount),
-			IPCounts:             make(map[string]*windowedCount),
-			OutboundCounts:       make(map[string]*windowedCount),
-			ASNCounts:            make(map[string]*windowedCount),
-			CountryCounts:        make(map[string]*windowedCount),
-			CityCounts:           make(map[string]*windowedCount),
+			UniqueIPs:            make(map[string]ipInfo),
+			DomainCounts:         make(map[string]windowedCount),
+			IPCounts:             make(map[string]windowedCount),
+			OutboundCounts:       make(map[string]windowedCount),
+			ASNCounts:            make(map[string]windowedCount),
+			CountryCounts:        make(map[string]windowedCount),
+			CityCounts:           make(map[string]windowedCount),
 			DomainTotals:         make(map[string]int64),
 			IPTotals:             make(map[string]int64),
+			OutboundTotals:       make(map[string]int64),
 			ASNTotals:            make(map[string]int64),
 			CountryTotals:        make(map[string]int64),
 			CityTotals:           make(map[string]int64),
@@ -405,8 +428,8 @@ func (p *Parser) GetMetrics() (int, int64) {
 	cutoff := time.Now().Add(-p.timeWindow)
 
 	activeIPs := 0
-	for _, lastSeen := range p.metrics.UniqueIPs {
-		if lastSeen.After(cutoff) {
+	for _, info := range p.metrics.UniqueIPs {
+		if info.lastSeen.After(cutoff) {
 			activeIPs++
 		}
 	}
@@ -425,6 +448,29 @@ func (p *Parser) GetMetrics() (int, int64) {
 	}
 
 	return activeIPs, int64(p.metrics.ConnectionsBufSize - expired)
+}
+
+// Returns the number of distinct client IPs in the time window per country,
+// city (city|country) and ASN (asn|org).
+func (p *Parser) GetUserGeoCounts() (countries, cities, asns map[string]int64) {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	cutoff := time.Now().Add(-p.timeWindow)
+	countries, cities, asns = map[string]int64{}, map[string]int64{}, map[string]int64{}
+	for _, info := range p.metrics.UniqueIPs {
+		if !info.lastSeen.After(cutoff) {
+			continue
+		}
+		if info.country != "" {
+			countries[info.country]++
+		}
+		if info.city != "" {
+			cities[info.city]++
+		}
+		asns[info.asn]++
+	}
+	return countries, cities, asns
 }
 
 // Returns a copy of current domain request counts.
@@ -491,6 +537,14 @@ func (p *Parser) GetIPTotals() map[string]int64 {
 	return maps.Clone(p.metrics.IPTotals)
 }
 
+// Returns a copy of the cumulative outbound request totals.
+func (p *Parser) GetOutboundTotals() map[string]int64 {
+	p.metrics.mu.RLock()
+	defer p.metrics.mu.RUnlock()
+
+	return maps.Clone(p.metrics.OutboundTotals)
+}
+
 // Returns a copy of the cumulative ASN request totals.
 func (p *Parser) GetASNTotals() map[string]int64 {
 	p.metrics.mu.RLock()
@@ -515,12 +569,12 @@ func (p *Parser) GetCityTotals() map[string]int64 {
 	return maps.Clone(p.metrics.CityTotals)
 }
 
-// Returns a plain key->count copy, dropping the last-seen bookkeeping so
-// callers (the exporter) keep working with map[string]int64.
-func snapshotCounts(m map[string]*windowedCount) map[string]int64 {
+// Returns a plain key->count copy, summing each key's minutes so callers (the
+// exporter) keep working with map[string]int64.
+func snapshotCounts(m map[string]windowedCount) map[string]int64 {
 	out := make(map[string]int64, len(m))
-	for k, v := range m {
-		out[k] = v.count
+	for k, wc := range m {
+		out[k] = wc.total()
 	}
 	return out
 }
@@ -580,6 +634,7 @@ func (p *Parser) parseLogFile() error {
 
 	p.mu.Lock()
 	currentInode := getInode(stat)
+	firstRun := p.metrics.LastInode == 0
 
 	switch {
 	case p.metrics.LastInode == 0:
@@ -625,8 +680,11 @@ func (p *Parser) parseLogFile() error {
 
 	// Merge the batch under the metrics lock. No parsing or I/O happens here,
 	// so scrapes are only blocked for the duration of a few map merges.
+	// The first run's backlog only fills the window. The previous process
+	// already counted most of it, so adding it to the totals would show a
+	// bump after every restart.
 	p.metrics.mu.Lock()
-	p.mergeDelta(delta)
+	p.mergeDelta(delta, !firstRun)
 	p.metrics.mu.Unlock()
 
 	p.mu.Lock()
@@ -649,6 +707,12 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		return
 	}
 
+	// Skip entries outside the time window. On startup this also skips the
+	// backlog already in the file, so it doesn't land in the counters at once.
+	if entry.Timestamp.Before(cutoff) {
+		return
+	}
+
 	// Always track domain and IP requests.
 	if domain := extractDomainOptimized(line); domain != "" {
 		if isIPAddressFast(domain) {
@@ -666,17 +730,11 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		recordCount(delta.outboundCounts, outbound, entry.Timestamp)
 	}
 
-	// User metrics below are time-windowed: skip entries outside the window.
-	if entry.Timestamp.Before(cutoff) {
-		return
-	}
-
 	if p.ipFilter.ShouldFilter(entry.IP) {
 		return
 	}
 
 	delta.timestamps = append(delta.timestamps, entry.Timestamp)
-	delta.uniqueIPs[entry.IP] = entry.Timestamp
 
 	countryCode := "unknown"
 	cityName := "unknown"
@@ -707,18 +765,22 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		}
 	}
 
+	// Key format: asn|org.
+	info := ipInfo{lastSeen: entry.Timestamp, asn: asn + "|" + org}
 	if countryCode != "unknown" {
+		info.country = countryCode
 		recordCount(delta.countryCounts, countryCode, entry.Timestamp)
 	}
 	if cityName != "unknown" {
-		recordCount(delta.cityCounts, cityName+"|"+countryCode, entry.Timestamp)
+		info.city = cityName + "|" + countryCode
+		recordCount(delta.cityCounts, info.city, entry.Timestamp)
 	}
-	// Key format: asn|org.
-	recordCount(delta.asnCounts, asn+"|"+org, entry.Timestamp)
+	recordCount(delta.asnCounts, info.asn, entry.Timestamp)
+	delta.uniqueIPs[entry.IP] = info
 }
 
 // Folds a parsed batch into the shared metrics. Caller must hold metrics.mu.
-func (p *Parser) mergeDelta(d *metricsDelta) {
+func (p *Parser) mergeDelta(d *metricsDelta, countTotals bool) {
 	mergeCounts(p.metrics.DomainCounts, d.domainCounts)
 	mergeCounts(p.metrics.IPCounts, d.ipCounts)
 	mergeCounts(p.metrics.OutboundCounts, d.outboundCounts)
@@ -726,14 +788,17 @@ func (p *Parser) mergeDelta(d *metricsDelta) {
 	mergeCounts(p.metrics.CountryCounts, d.countryCounts)
 	mergeCounts(p.metrics.CityCounts, d.cityCounts)
 
-	addTotals(p.metrics.DomainTotals, d.domainCounts)
-	addTotals(p.metrics.IPTotals, d.ipCounts)
-	addTotals(p.metrics.ASNTotals, d.asnCounts)
-	addTotals(p.metrics.CountryTotals, d.countryCounts)
-	addTotals(p.metrics.CityTotals, d.cityCounts)
+	if countTotals {
+		addTotals(p.metrics.DomainTotals, d.domainCounts)
+		addTotals(p.metrics.IPTotals, d.ipCounts)
+		addTotals(p.metrics.OutboundTotals, d.outboundCounts)
+		addTotals(p.metrics.ASNTotals, d.asnCounts)
+		addTotals(p.metrics.CountryTotals, d.countryCounts)
+		addTotals(p.metrics.CityTotals, d.cityCounts)
+	}
 
-	for ip, ts := range d.uniqueIPs {
-		p.metrics.UniqueIPs[ip] = ts
+	for ip, info := range d.uniqueIPs {
+		p.metrics.UniqueIPs[ip] = info
 	}
 	for _, ts := range d.timestamps {
 		p.addConnectionTimestamp(ts)
@@ -741,23 +806,20 @@ func (p *Parser) mergeDelta(d *metricsDelta) {
 }
 
 // Folds a batch into the cumulative totals. Only ever adds.
-func addTotals(dst map[string]int64, src map[string]*windowedCount) {
-	for k, v := range src {
-		dst[k] += v.count
+func addTotals(dst map[string]int64, src map[string]windowedCount) {
+	for k, wc := range src {
+		dst[k] += wc.total()
 	}
 }
 
-// Folds src into dst, summing counts and keeping the latest last-seen.
-func mergeCounts(dst, src map[string]*windowedCount) {
-	for k, v := range src {
-		wc := dst[k]
-		if wc == nil {
-			wc = &windowedCount{}
-			dst[k] = wc
+// Folds src into dst, summing counts minute by minute.
+func mergeCounts(dst, src map[string]windowedCount) {
+	for k, wc := range src {
+		if dst[k] == nil {
+			dst[k] = windowedCount{}
 		}
-		wc.count += v.count
-		if v.lastSeen.After(wc.lastSeen) {
-			wc.lastSeen = v.lastSeen
+		for minute, c := range wc {
+			dst[k][minute] += c
 		}
 	}
 }

@@ -8,11 +8,11 @@ Rotation is detected by inode, so log parsing is unix only. Linux and macOS buil
 
 From the access log:
 
-- Unique users and open connections over a rolling window
+- Unique users and requests over a rolling window
 - Top requested domains, with subdomains folded into their registrable domain
 - Top direct IP destinations, with localhost, private ranges, and the usual public DNS resolvers filtered out
-- Top ASNs with their network name, top countries, and top cities, resolved from GeoLite2 databases the exporter downloads and refreshes on its own
-- A world map of connections by country or city
+- Top ASNs with their network name, top countries, and top cities, by requests and by unique users. They are resolved from GeoLite2 databases the exporter downloads at startup and downloads again on a later start once they are over 7 days old
+- A world map of users or requests by country or city
 - How traffic splits across your outbounds, including whichever tag your config uses for blocked traffic
 
 From the Stats API:
@@ -243,12 +243,17 @@ Only exported when `--log-path` points at a readable access log.
 | Metric | Type | Description | Labels |
 | :----- | :--- | :---------- | :----- |
 | `xray_requested_domain_ip_total` | counter | Requests per domain or IP since startup | `target` |
+| `xray_outbound_requests_total` | counter | Requests per outbound since startup | `outbound` |
 | `xray_asns_total` | counter | Requests per ASN since startup | `asn`, `org` |
 | `xray_countries_total` | counter | Requests per country since startup | `country` |
 | `xray_cities_total` | counter | Requests per city since startup | `city`, `country` |
 | `xray_unique_users` | gauge | Unique users active in the time window | |
-| `xray_total_connections` | gauge | Connections in the time window | |
-| `xray_outbound_requests` | gauge | Requests per outbound in the time window | `outbound` |
+| `xray_unique_users_by_country` | gauge | Unique users per country in the time window | `country` |
+| `xray_unique_users_by_city` | gauge | Unique users per city in the time window | `city`, `country` |
+| `xray_unique_users_by_asn` | gauge | Unique users per ASN in the time window | `asn`, `org` |
+| `xray_total_connections` | gauge | Requests in the time window. Each access log line is one connection opened, not one open connection | |
+
+The counters export only the keys busiest in the time window. A unique user is a distinct client IP, so one person on two devices counts twice.
 
 ## Development
 
