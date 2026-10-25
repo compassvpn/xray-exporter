@@ -467,9 +467,6 @@ func (p *Parser) GetUserGeoCounts() (countries, cities, asns map[string]int64) {
 		}
 		if info.city != "" {
 			cities[info.city]++
-		} else if info.country != "" {
-			// GeoLite2 has no city for most IPs, so count them as unknown to match country totals.
-			cities["unknown|"+info.country]++
 		}
 		asns[info.asn]++
 	}
@@ -774,7 +771,8 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 		info.country = countryCode
 		recordCount(delta.countryCounts, countryCode, entry.Timestamp)
 	}
-	if cityName != "unknown" {
+	// GeoLite2 has no city for most IPs, so count them as unknown to match country totals.
+	if cityName != "unknown" || countryCode != "unknown" {
 		info.city = cityName + "|" + countryCode
 		recordCount(delta.cityCounts, info.city, entry.Timestamp)
 	}
