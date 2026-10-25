@@ -246,7 +246,7 @@ Only exported when `--log-path` points at a readable access log.
 | `xray_outbound_requests_total` | counter | Requests per outbound since startup | `outbound` |
 | `xray_asns_total` | counter | Requests per ASN since startup | `asn`, `org` |
 | `xray_countries_total` | counter | Requests per country since startup | `country` |
-| `xray_cities_total` | counter | Requests per city since startup | `city`, `country` |
+| `xray_cities_total` | counter | Requests per city since startup (`unknown` when GeoIP has a country but no city) | `city`, `country` |
 | `xray_unique_users` | gauge | Unique users active in the time window | |
 | `xray_unique_users_by_country` | gauge | Unique users per country in the time window | `country` |
 | `xray_unique_users_by_city` | gauge | Unique users per city in the time window (`unknown` when GeoIP has a country but no city) | `city`, `country` |
