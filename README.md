@@ -249,7 +249,7 @@ Only exported when `--log-path` points at a readable access log.
 | `xray_cities_total` | counter | Requests per city since startup | `city`, `country` |
 | `xray_unique_users` | gauge | Unique users active in the time window | |
 | `xray_unique_users_by_country` | gauge | Unique users per country in the time window | `country` |
-| `xray_unique_users_by_city` | gauge | Unique users per city in the time window | `city`, `country` |
+| `xray_unique_users_by_city` | gauge | Unique users per city in the time window (`unknown` when GeoIP has a country but no city) | `city`, `country` |
 | `xray_unique_users_by_asn` | gauge | Unique users per ASN in the time window | `asn`, `org` |
 | `xray_total_connections` | gauge | Requests in the time window. Each access log line is one connection opened, not one open connection | |
 
