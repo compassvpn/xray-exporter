@@ -175,7 +175,7 @@ Open `http://ip:9550` and follow the `Scrape Xray Metrics` link to see the outpu
 
 The exporter uses the free GeoLite2 databases unless you give it a db-ip subscription or your own files.
 
-With a db-ip account key, the exporter downloads the db-ip database to `--geoip-dir` in the background and checks for a new release once a day. Until the first download finishes, the country and city metrics stay empty and every ASN reads `unknown`. The IP to Location + ISP file is about 1.3 GB compressed and bigger once unpacked, and an update keeps the old and new files on disk side by side for a moment.
+With a db-ip account key, the exporter downloads the db-ip database to `--geoip-dir` in the background and checks for a new release once a day. Until the first download finishes, the country and city metrics stay empty and every ASN reads `unknown`. An update keeps the old and new files on disk side by side for a moment.
 
 ```bash
 DBIP_KEY=your-account-key xray-exporter --xray-endpoint "127.0.0.1:54321" --geoip-dir /geoip

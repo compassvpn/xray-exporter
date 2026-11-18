@@ -32,7 +32,7 @@ func watchDBIP(db *DB, key, product, current string) {
 		path, err := fetchDBIP(key, product)
 		switch {
 		case err != nil:
-			// A failed download can be over a gigabyte, so back off: 3, 6, 12, then 24 hours.
+			// Back off: 3, 6, 12, then 24 hours.
 			wait, retry = retry, min(2*retry, wait)
 			logrus.WithError(err).Warnf("Failed to update the db-ip database, retrying in %s", wait)
 		case path != current && db.Open(path):
@@ -84,7 +84,7 @@ func fetchDBIP(key, product string) (string, error) {
 	if err := os.MkdirAll(Dir, 0o755); err != nil {
 		return "", err
 	}
-	// A killed download leaves its temp file behind, and these run over a gigabyte.
+	// A killed download leaves its temp file behind.
 	leftovers, _ := filepath.Glob(filepath.Join(Dir, "dbip.tmp-*"))
 	for _, f := range leftovers {
 		_ = os.Remove(f)
@@ -131,7 +131,7 @@ func get(ctx context.Context, url string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", userAgent)
 	// Setting this ourselves stops Go from gunzipping the body behind our back,
-	// which would break the gunzip.
+	// so the gzip reader gets the raw .gz.
 	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := http.DefaultClient.Do(req)
