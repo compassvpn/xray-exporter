@@ -159,7 +159,7 @@ docker run --rm -d \
   --geoip-dir /geoip
 ```
 
-The GeoLite2 databases are written to `--geoip-dir`, which defaults to the working directory. Inside the container that is `/`, so a container started with `--read-only` and no writable volume cannot download them. That is not fatal, but the ASN, country, and city metrics stay empty.
+The GeoLite2 or db-ip databases are written to `--geoip-dir`, which defaults to the working directory. Inside the container that is `/`, so a container started with `--read-only` and no writable volume cannot download them. That is not fatal, but the ASN, country, and city metrics stay empty.
 
 On startup you should see:
 

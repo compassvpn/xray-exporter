@@ -25,13 +25,14 @@ func WatchDBIP(db *DB, key, product string) {
 		current = found[0]
 	}
 
+	retry := 3 * time.Hour
 	for {
 		wait := 24 * time.Hour
 		path, err := fetchDBIP(key, product)
 		switch {
 		case err != nil:
-			// Not hourly: a failed download can be over a gigabyte.
-			wait = 3 * time.Hour
+			// A failed download can be over a gigabyte, so back off: 3, 6, 12, then 24 hours.
+			wait, retry = retry, min(2*retry, wait)
 			logrus.WithError(err).Warnf("Failed to update the db-ip database, retrying in %s", wait)
 		case path != current && db.Open(path):
 			current = path
@@ -41,6 +42,9 @@ func WatchDBIP(db *DB, key, product string) {
 					_ = os.Remove(f)
 				}
 			}
+		}
+		if err == nil {
+			retry = 3 * time.Hour
 		}
 		time.Sleep(wait)
 	}
