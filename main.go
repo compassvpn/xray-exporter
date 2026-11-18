@@ -20,17 +20,20 @@ import (
 )
 
 var opts struct {
-	Listen                 string `short:"l" long:"listen" description:"Listen address" value-name:"[ADDR]:PORT" default:":9550"`
-	MetricsPath            string `short:"m" long:"metrics-path" description:"Metrics path" value-name:"PATH" default:"/scrape"`
-	XRayEndpoint           string `short:"e" long:"xray-endpoint" description:"Xray API endpoint" value-name:"HOST:PORT" default:"127.0.0.1:8080"`
-	ScrapeTimeoutInSeconds int64  `short:"t" long:"scrape-timeout" description:"The timeout in seconds for every individual scrape" value-name:"N" default:"5"`
-	UserTrafficMetrics     bool   `short:"u" long:"user-traffic-metrics" description:"Export per-user traffic byte counters (high cardinality: one series per user)"`
-	LogPath                string `short:"p" long:"log-path" description:"Path to Xray access log file (empty to disable user metrics)" value-name:"PATH" default:"/var/log/xray/access.log"`
-	LogTimeWindowMinutes   int    `short:"w" long:"log-time-window" description:"Time window in minutes for user metrics" value-name:"N"`
-	GeoIPDir               string `short:"g" long:"geoip-dir" description:"Directory for GeoLite2 databases" value-name:"PATH" default:"."`
-	Version                bool   `long:"version" description:"Display the version and exit"`
-	LogLevel               string `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: info)" value-name:"LEVEL"`
-	LogFormat              string `long:"log-format" description:"Log format: text, json (env: LOG_FORMAT) (default: text)" value-name:"FORMAT"`
+	Listen                 string   `short:"l" long:"listen" description:"Listen address" value-name:"[ADDR]:PORT" default:":9550"`
+	MetricsPath            string   `short:"m" long:"metrics-path" description:"Metrics path" value-name:"PATH" default:"/scrape"`
+	XRayEndpoint           string   `short:"e" long:"xray-endpoint" description:"Xray API endpoint" value-name:"HOST:PORT" default:"127.0.0.1:8080"`
+	ScrapeTimeoutInSeconds int64    `short:"t" long:"scrape-timeout" description:"The timeout in seconds for every individual scrape" value-name:"N" default:"5"`
+	UserTrafficMetrics     bool     `short:"u" long:"user-traffic-metrics" description:"Export per-user traffic byte counters (high cardinality: one series per user)"`
+	LogPath                string   `short:"p" long:"log-path" description:"Path to Xray access log file (empty to disable user metrics)" value-name:"PATH" default:"/var/log/xray/access.log"`
+	LogTimeWindowMinutes   int      `short:"w" long:"log-time-window" description:"Time window in minutes for user metrics" value-name:"N"`
+	GeoIPDir               string   `short:"g" long:"geoip-dir" description:"Directory for the downloaded GeoIP databases" value-name:"PATH" default:"."`
+	GeoIPFiles             []string `long:"geoip-file" description:"MMDB file to use instead of downloading one. Repeat it to combine files, the first one with a value wins" value-name:"PATH"`
+	DBIPKey                string   `long:"dbip-key" env:"DBIP_KEY" description:"db-ip account key. Downloads the db-ip database and checks for a new release daily, instead of using GeoLite2" value-name:"KEY"`
+	DBIPDB                 string   `long:"dbip-db" description:"db-ip database to download" value-name:"NAME" default:"ip-to-location-isp"`
+	Version                bool     `long:"version" description:"Display the version and exit"`
+	LogLevel               string   `long:"log-level" description:"Log level: error, warn, info, debug (env: LOG_LEVEL) (default: info)" value-name:"LEVEL"`
+	LogFormat              string   `long:"log-format" description:"Log format: text, json (env: LOG_FORMAT) (default: text)" value-name:"FORMAT"`
 }
 
 // Build information injected during compilation.
@@ -116,11 +119,27 @@ func main() {
 		return
 	}
 
-	// Download GeoLite2 databases on startup. GeoIP is optional enrichment, so a
-	// download failure is non-fatal: the exporter still serves core gRPC metrics.
+	// GeoIP is optional enrichment, so a missing database is non-fatal: the
+	// exporter still serves core gRPC metrics.
 	geoip.Dir = opts.GeoIPDir
-	if err := geoip.DownloadDB(); err != nil {
-		logrus.WithError(err).Warn("Failed to initialize GeoIP database, GeoIP metrics will be unavailable")
+	geo := &geoip.DB{}
+	defer geo.Close()
+	switch {
+	case len(opts.GeoIPFiles) > 0:
+		geo.Open(opts.GeoIPFiles...)
+	case opts.DBIPKey != "":
+		// The db-ip file is over a gigabyte, so don't hold up startup for it.
+		go geoip.WatchDBIP(geo, opts.DBIPKey, opts.DBIPDB)
+	default:
+		if err := geoip.DownloadDB(); err != nil {
+			logrus.WithError(err).Warn("Failed to initialize GeoIP database, GeoIP metrics will be unavailable")
+		}
+		// The City file has every country the Country file has, so Country is only a fallback.
+		city := geoip.CityPath()
+		if _, err := os.Stat(city); err != nil {
+			city = geoip.CountryPath()
+		}
+		geo.Open(city, geoip.ASNPath())
 	}
 
 	scrapeTimeout := time.Duration(opts.ScrapeTimeoutInSeconds) * time.Second
@@ -130,7 +149,7 @@ func main() {
 		timeWindowMinutes = DefaultLogTimeWindowMinutes
 	}
 	logTimeWindow := time.Duration(timeWindowMinutes) * time.Minute
-	exporter, err := NewExporterWithLogConfig(opts.XRayEndpoint, scrapeTimeout, opts.UserTrafficMetrics, opts.LogPath, logTimeWindow)
+	exporter, err := NewExporterWithLogConfig(opts.XRayEndpoint, scrapeTimeout, opts.UserTrafficMetrics, opts.LogPath, logTimeWindow, geo)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to create exporter")
 	}

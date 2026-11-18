@@ -6,7 +6,7 @@ toolchain go1.26.4
 
 require (
 	github.com/jessevdk/go-flags v1.6.1
-	github.com/oschwald/geoip2-golang v1.13.0
+	github.com/oschwald/maxminddb-golang v1.13.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sirupsen/logrus v1.10.2
 	github.com/xtls/xray-core v1.260327.0
@@ -18,7 +18,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/oschwald/maxminddb-golang v1.13.0 // indirect
 	github.com/pires/go-proxyproto v0.11.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
