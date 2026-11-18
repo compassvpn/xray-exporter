@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -39,16 +38,11 @@ type Exporter struct {
 	logParser     *logparser.Parser
 	logPath       string
 	logTimeWindow time.Duration
-
-	// GeoIP readers for log enrichment.
-	geoipASNReader     *geoip2.Reader
-	geoipCityReader    *geoip2.Reader
-	geoipCountryReader *geoip2.Reader
 }
 
 // Creates a new Xray exporter with custom log parsing configuration.
 // Pass empty logPath to disable user metrics from log parsing.
-func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, userTrafficMetrics bool, logPath string, logTimeWindow time.Duration) (*Exporter, error) {
+func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, userTrafficMetrics bool, logPath string, logTimeWindow time.Duration, geo *geoip.DB) (*Exporter, error) {
 	e := Exporter{
 		endpoint:           endpoint,
 		scrapeTimeout:      scrapeTimeout,
@@ -141,36 +135,14 @@ func NewExporterWithLogConfig(endpoint string, scrapeTimeout time.Duration, user
 
 	e.conn = conn
 
-	// Initialize GeoIP readers. GeoIP is optional enrichment, so a missing or
-	// unreadable database is logged and skipped rather than being fatal.
-	if asnDB, err := geoip2.Open(geoip.ASNPath()); err != nil {
-		logrus.WithError(err).Warn("Failed to open GeoIP ASN database, ASN metrics will be unavailable")
-	} else {
-		e.geoipASNReader = asnDB
-	}
-
-	if cityDB, err := geoip2.Open(geoip.CityPath()); err != nil {
-		logrus.WithError(err).Warn("Failed to open GeoIP City database, city/country metrics will be unavailable")
-	} else {
-		e.geoipCityReader = cityDB
-	}
-
-	if countryDB, err := geoip2.Open(geoip.CountryPath()); err != nil {
-		logrus.WithError(err).Warn("Failed to open GeoIP Country database, country metrics will be limited")
-	} else {
-		e.geoipCountryReader = countryDB
-	}
-
 	if logPath != "" && logPath != "disabled" {
 		if _, err := os.Stat(logPath); err != nil {
 			logrus.WithError(err).Warn("Log file not found, user metrics will not be available")
 		} else {
 			parser, err := logparser.NewParser(logparser.Config{
-				LogPath:       logPath,
-				TimeWindow:    logTimeWindow,
-				ASNReader:     e.geoipASNReader,
-				CountryReader: e.geoipCountryReader,
-				CityReader:    e.geoipCityReader,
+				LogPath:    logPath,
+				TimeWindow: logTimeWindow,
+				Geo:        geo,
 			})
 			if err != nil {
 				logrus.WithError(err).Warn("Failed to create log parser")
@@ -493,19 +465,10 @@ func (e *Exporter) collectUserGeoMetrics(ch chan<- prometheus.Metric) {
 	}
 }
 
-// Closes the gRPC connection, GeoIP readers, and log parser.
+// Closes the gRPC connection and log parser.
 func (e *Exporter) Close() error {
 	if e.logParser != nil {
 		e.logParser.Stop()
-	}
-	if e.geoipASNReader != nil {
-		e.geoipASNReader.Close()
-	}
-	if e.geoipCityReader != nil {
-		e.geoipCityReader.Close()
-	}
-	if e.geoipCountryReader != nil {
-		e.geoipCountryReader.Close()
 	}
 	if e.conn != nil {
 		return e.conn.Close()

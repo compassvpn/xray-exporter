@@ -11,7 +11,7 @@ From the access log:
 - Unique users and requests over a rolling window
 - Top requested domains, with subdomains folded into their registrable domain
 - Top direct IP destinations, with localhost, private ranges, and the usual public DNS resolvers filtered out
-- Top ASNs with their network name, top countries, and top cities, by requests and by unique users. They are resolved from GeoLite2 databases the exporter downloads at startup and downloads again on a later start once they are over 7 days old
+- Top ASNs with their network name, top countries, and top cities, by requests and by unique users. They are resolved from GeoLite2 databases the exporter downloads at startup and downloads again on a later start once they are over 7 days old. A db-ip subscription or your own MMDB files can replace them, see [GeoIP databases](#geoip-databases)
 - A world map of users or requests by country or city
 - How traffic splits across your outbounds, including whichever tag your config uses for blocked traffic
 
@@ -159,7 +159,7 @@ docker run --rm -d \
   --geoip-dir /geoip
 ```
 
-The GeoLite2 databases are written to `--geoip-dir`, which defaults to the working directory. Inside the container that is `/`, so a container started with `--read-only` and no writable volume cannot download them. That is not fatal, but the ASN, country, and city metrics stay empty.
+The GeoLite2 or db-ip databases are written to `--geoip-dir`, which defaults to the working directory. Inside the container that is `/`, so a container started with `--read-only` and no writable volume cannot download them. That is not fatal, but the ASN, country, and city metrics stay empty.
 
 On startup you should see:
 
@@ -170,6 +170,24 @@ time="2025-01-15T10:30:45Z" level=info msg="Server starting on :9550"
 ```
 
 Open `http://ip:9550` and follow the `Scrape Xray Metrics` link to see the output. If `xray_up 1` is missing from the response, the scrape failed and the exporter logs will say why.
+
+### GeoIP databases
+
+The exporter uses the free GeoLite2 databases unless you give it a db-ip subscription or your own files.
+
+With a db-ip account key, the exporter downloads the db-ip database to `--geoip-dir` in the background and checks for a new release once a day. Until the first download finishes, the country and city metrics stay empty and every ASN reads `unknown`. An update keeps the old and new files on disk side by side for a moment.
+
+```bash
+DBIP_KEY=your-account-key xray-exporter --xray-endpoint "127.0.0.1:54321" --geoip-dir /geoip
+```
+
+The key is on the Updates tab of your db-ip account. If you subscribe to a different database, pass `--dbip-db` with the last part of the private URL shown on that tab.
+
+To use files you manage yourself, pass `--geoip-file` once per file. The exporter reads `country.iso_code` and `city.names.en`, and the ASN and org from the top level as GeoLite2-ASN stores them or from `traits` as Enterprise-style files do.
+
+```bash
+xray-exporter --xray-endpoint "127.0.0.1:54321" --geoip-file /geoip/City.mmdb --geoip-file /geoip/ASN.mmdb
+```
 
 ### Prometheus
 
@@ -200,7 +218,10 @@ Import [dashboard 23181](https://grafana.com/grafana/dashboards/23181-compassvpn
 | `-u, --user-traffic-metrics` | off | Export per-user traffic byte counters |
 | `-p, --log-path PATH` | `/var/log/xray/access.log` | Access log to parse. Empty disables the log metrics |
 | `-w, --log-time-window N` | `5` | Window in minutes for the log metrics |
-| `-g, --geoip-dir PATH` | `.` | Directory for the GeoLite2 databases |
+| `-g, --geoip-dir PATH` | `.` | Directory for the downloaded GeoIP databases |
+| `--geoip-file PATH` | | MMDB file to use instead of downloading one. Repeat it to combine files |
+| `--dbip-key KEY` | | db-ip account key. Uses the db-ip database instead of GeoLite2. Also read from `DBIP_KEY` |
+| `--dbip-db NAME` | `ip-to-location-isp` | db-ip database to download |
 | `--log-level LEVEL` | `info` | `error`, `warn`, `info`, or `debug`. Also read from `LOG_LEVEL` |
 | `--log-format FORMAT` | `text` | `text` or `json`. Also read from `LOG_FORMAT` |
 | `--version` | | Print the version and exit |

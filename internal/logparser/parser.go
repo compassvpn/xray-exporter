@@ -11,15 +11,15 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/oschwald/geoip2-golang"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/publicsuffix"
+
+	"xray-exporter/internal/geoip"
 )
 
 // Cardinality limits: only the top-N keys per metric are exported.
@@ -111,18 +111,14 @@ type Parser struct {
 	cancel     context.CancelFunc
 	mu         sync.Mutex
 
-	asnReader     *geoip2.Reader
-	countryReader *geoip2.Reader
-	cityReader    *geoip2.Reader
+	geo *geoip.DB
 }
 
 // Configuration options for the log parser.
 type Config struct {
-	LogPath       string
-	TimeWindow    time.Duration
-	ASNReader     *geoip2.Reader
-	CountryReader *geoip2.Reader
-	CityReader    *geoip2.Reader
+	LogPath    string
+	TimeWindow time.Duration
+	Geo        *geoip.DB
 }
 
 var (
@@ -374,12 +370,10 @@ func NewParser(config Config) (*Parser, error) {
 	initialCap := min(bufferCap, 1024)
 
 	parser := &Parser{
-		logPath:       config.LogPath,
-		timeWindow:    config.TimeWindow,
-		ipFilter:      NewIPFilter(),
-		asnReader:     config.ASNReader,
-		countryReader: config.CountryReader,
-		cityReader:    config.CityReader,
+		logPath:    config.LogPath,
+		timeWindow: config.TimeWindow,
+		ipFilter:   NewIPFilter(),
+		geo:        config.Geo,
 		metrics: &MetricsData{
 			UniqueIPs:            make(map[string]ipInfo),
 			DomainCounts:         make(map[string]windowedCount),
@@ -736,33 +730,12 @@ func (p *Parser) processLine(line string, cutoff time.Time, delta *metricsDelta)
 
 	delta.timestamps = append(delta.timestamps, entry.Timestamp)
 
-	countryCode := "unknown"
-	cityName := "unknown"
-	asn := "unknown"
-	org := "unknown"
-
-	if p.cityReader != nil {
-		if record, err := p.cityReader.City(entry.ParsedIP); err == nil {
-			if record.Country.IsoCode != "" {
-				countryCode = record.Country.IsoCode
-			}
-			if name, ok := record.City.Names["en"]; ok && name != "" {
-				cityName = name
-			}
-		}
-	} else if p.countryReader != nil {
-		if record, err := p.countryReader.Country(entry.ParsedIP); err == nil {
-			if record.Country.IsoCode != "" {
-				countryCode = record.Country.IsoCode
-			}
-		}
-	}
-
-	if p.asnReader != nil {
-		if record, err := p.asnReader.ASN(entry.ParsedIP); err == nil {
-			asn = strconv.FormatUint(uint64(record.AutonomousSystemNumber), 10)
-			org = record.AutonomousSystemOrganization
-		}
+	geo := p.geo.Lookup(entry.ParsedIP)
+	countryCode := cmp.Or(geo.Country, "unknown")
+	cityName := cmp.Or(geo.City, "unknown")
+	asn, org := "unknown", "unknown"
+	if geo.ASN != "" {
+		asn, org = geo.ASN, geo.Org
 	}
 
 	// Key format: asn|org.
