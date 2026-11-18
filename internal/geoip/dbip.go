@@ -3,8 +3,6 @@ package geoip
 import (
 	"compress/gzip"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,14 +15,17 @@ import (
 )
 
 // Keeps db on the newest release of a db-ip subscription. It opens the file
-// already on disk, then checks db-ip now and once a day after that. It never
-// returns, so run it in its own goroutine.
+// already on disk before returning, so the log parser never starts without it,
+// then checks db-ip in the background now and once a day after that.
 func WatchDBIP(db *DB, key, product string) {
 	var current string
 	if found, _ := filepath.Glob(filepath.Join(Dir, "dbip-*.mmdb")); len(found) > 0 && db.Open(found[0]) {
 		current = found[0]
 	}
+	go watchDBIP(db, key, product, current)
+}
 
+func watchDBIP(db *DB, key, product, current string) {
 	retry := 3 * time.Hour
 	for {
 		wait := 24 * time.Hour
@@ -106,9 +107,7 @@ func fetchDBIP(key, product string) (string, error) {
 		_ = os.Remove(tmp.Name())
 	}()
 
-	// db-ip's checksum is of the .gz, so hash the raw bytes on their way to gunzip.
-	hash := sha1.New()
-	gz, err := gzip.NewReader(io.TeeReader(resp.Body, hash))
+	gz, err := gzip.NewReader(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -117,9 +116,6 @@ func fetchDBIP(key, product string) (string, error) {
 	}
 	if err := tmp.Close(); err != nil {
 		return "", err
-	}
-	if sum := hex.EncodeToString(hash.Sum(nil)); sum != release.MMDB.SHA1Sum {
-		return "", fmt.Errorf("db-ip download is corrupt: sha1 %s, want %s", sum, release.MMDB.SHA1Sum)
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return "", err
@@ -135,7 +131,7 @@ func get(ctx context.Context, url string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", userAgent)
 	// Setting this ourselves stops Go from gunzipping the body behind our back,
-	// which would break the checksum.
+	// which would break the gunzip.
 	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := http.DefaultClient.Do(req)

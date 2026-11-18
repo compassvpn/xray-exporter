@@ -128,8 +128,7 @@ func main() {
 	case len(opts.GeoIPFiles) > 0:
 		geo.Open(opts.GeoIPFiles...)
 	case opts.DBIPKey != "":
-		// The db-ip file is over a gigabyte, so don't hold up startup for it.
-		go geoip.WatchDBIP(geo, opts.DBIPKey, opts.DBIPDB)
+		geoip.WatchDBIP(geo, opts.DBIPKey, opts.DBIPDB)
 	default:
 		if err := geoip.DownloadDB(); err != nil {
 			logrus.WithError(err).Warn("Failed to initialize GeoIP database, GeoIP metrics will be unavailable")
